@@ -40,7 +40,7 @@ The design for the menu-bar app is written up in [SPEC.md](SPEC.md) §5.
 ## Install
 
 ```sh
-git clone https://github.com/<you>/talkie.git
+git clone https://github.com/KeerXiao/talkie.git
 cd talkie
 uv sync
 ```
