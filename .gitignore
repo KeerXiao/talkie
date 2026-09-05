@@ -1,2 +1,28 @@
+# Editors
 .idea/
+.vscode/
+.DS_Store
+
+# Python
 __pycache__/
+*.py[cod]
+
+# Environments — only ignored today because uv drops a self-ignoring
+# .gitignore inside .venv/; don't rely on that.
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build output
+dist/
+build/
+*.egg-info/
+
+# Secrets — never let a key reach the repo
+.env
+.env.*
+!.env.example
