@@ -71,6 +71,8 @@ Each module owns one concern and depends only on the ones below it, so a backend
 | `hotkey.py` | Chord parsing, macOS key normalisation, engage/disengage edges | `Chord`, `ChordListener` |
 | `client/` | Backend layer: HTTP, auth, error mapping, retries | `TranscriptionClient`, `OpenRouterClient`, `Transcript`, `ClientError` |
 | `paste.py` | Clipboard borrow → ⌘V → restore; failure beep | `Paster`, `beep()` |
+| `permissions.py` | Probe the macOS grants that fail silently | `accessibility_trusted()` |
+| `sound.py` | Non-blocking audible cues via `afplay` | `Player` |
 | `app.py` | Wire the above into the push-to-talk loop; own the busy/recording state | `Talkie` |
 | `cli.py` | Argument parsing, logging setup, entry point | `main()` |
 
@@ -132,6 +134,18 @@ Overridable by `TALKIE_HOTKEY`.
 One recording at a time; ignore hotkey-down while a request is in flight.
 - **Clip guard:** discard recordings shorter than 0.3 s (accidental taps) — no API call.
 - **Timeout:** 30 s on the HTTP request; a hung network fails as an error rather than wedging the app.
+- **Cues:** the user is looking at another app, so state changes are audible — Tink on hotkey down ("listening"), Bottle on release ("heard you"), Basso on failure.
+- **Playback via `afplay`,** the audio player at `/usr/bin/afplay` that ships with macOS, over the `/System/Library/Sounds/*.aiff` the OS already uses for its own alerts.
+A Python audio library (`playsound`, `pygame`, `simpleaudio`) or PyObjC/CoreAudio would be a dependency and a build surface for the sake of a half-second noise; a subprocess to a binary that is guaranteed present is not.
+- **Cues are fire-and-forget on a throwaway thread.**
+`afplay` lives for the duration of the sound (~0.6 s), and the cue is triggered from the chord callback, so a blocking call there would delay the microphone opening by that much and clip the first word.
+The thread also reaps the child, so no zombies accumulate over a long session.
+- **Cue ordering:** the start cue fires *before* the mic opens and the stop cue *after* it closes.
+This minimises but does not eliminate bleed into the recording — `afplay` needs ~50 ms to make its first sound, by which time the stream is live, so on laptop speakers the Tink lands in the clip.
+Harmless for the STT models in practice; headphones or a lower volume remove it.
+- **Volume is relative, not absolute.**
+`afplay -v` multiplies the system output level rather than replacing it, so `TALKIE_SOUND_VOLUME` cannot make a muted Mac audible, and a low system volume compounds with it.
+The default is therefore `1.0` (no attenuation); values above 1 amplify, for a Mac habitually turned down.
 - **Errors:** the client maps each failure to a type — `AuthError` (401/403), `InsufficientCreditsError` (402), `RateLimitError` (429), `ServerError` (5xx), `NetworkError`, `ResponseError`.
 `app.py` logs the message and plays the system alert sound (`afplay`); error text is never pasted.
 - **Retries:** the client retries only what a second attempt can fix — rate limits, 5xx and transport failures — twice, with 0.5 s then 1 s backoff.
@@ -144,6 +158,7 @@ A bad key or an empty account fails immediately rather than making the user wait
   | `TALKIE_MODEL` | `microsoft/mai-transcribe-2` | OpenRouter model ID |
   | `TALKIE_HOTKEY` | `ctrl+q` | Push-to-talk chord |
   | `TALKIE_LANGUAGE` | `en` | Passed through as `language`; unset to let the model auto-detect |
+| `TALKIE_SOUND_VOLUME` | `1.0` | Multiplies system output volume; `0` off, `>1` amplifies |
 
 ### 4.5 Acceptance criteria
 
@@ -218,9 +233,9 @@ The M1 recording and transcription code must not gain any UI calls; it publishes
 ```sh
 uv sync                  # installs the package and its deps into .venv
 uv run talkie            # hotkey loop
-uv run talkie --check    # verify the API key and exit
+uv run talkie --check    # verify the API key and permissions, then exit
 uv run talkie --record 3 # dev aid: record 3s, print the transcript, no paste
-uv run pytest            # 75 tests; no mic, network or permissions needed
+uv run pytest            # 80 tests; no mic, network or permissions needed
 ```
 
 Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`.
@@ -237,7 +252,18 @@ The terminal app (or Python binary) running the script needs, under System Setti
 - **Accessibility** — for the global hotkey and simulated ⌘V
 - **Input Monitoring** — sometimes required by `pynput` for key events
 
-First run will prompt; if the hotkey silently does nothing, check Accessibility / Input Monitoring.
+The grant is per **host app** — the terminal or IDE talkie is launched from — and a running process does not pick up a new grant, so the app must be quit and reopened.
+
+These three fail in completely different ways, which is why `permissions.py` probes rather than guesses:
+
+| Missing | Symptom |
+|---|---|
+| Microphone | Loud — the stream raises on `start()`. |
+| Input Monitoring | Silent — the hotkey never fires; no `recording…` line. |
+| Accessibility | Silent — everything works, the transcript comes back, and ⌘V does nothing. |
+
+The Accessibility case is the trap: without a check, `paste()` would restore the previous clipboard 0.3 s later and destroy the transcript it just paid for.
+So when `AXIsProcessTrusted()` is false, talkie copies the text and stops — the transcript stays on the clipboard for a manual ⌘V — and says so at startup and in `--check`.
 
 ## 8. Cost estimate
 

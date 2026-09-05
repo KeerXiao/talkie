@@ -9,7 +9,9 @@ from talkie.audio import Clip, Recorder
 from talkie.client import ClientError, OpenRouterClient, TranscriptionClient
 from talkie.config import Config
 from talkie.hotkey import ChordListener, parse_hotkey
-from talkie.paste import Paster, beep
+from talkie.paste import Paster
+from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
+from talkie.sound import Player
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ class Talkie:
         recorder: Recorder | None = None,
         client: TranscriptionClient | None = None,
         paster: Paster | None = None,
+        sound: Player | None = None,
     ) -> None:
         self.config = config
         self.chord = parse_hotkey(config.hotkey)
@@ -38,6 +41,7 @@ class Talkie:
             timeout=config.request_timeout,
         )
         self.paster = paster or Paster(config.paste_settle)
+        self.sound = sound or Player(config.sound_volume)
         self.listener = ChordListener(self.chord, self._on_engage, self._on_disengage)
 
         self._lock = threading.Lock()
@@ -53,6 +57,9 @@ class Talkie:
             self.config.model,
             self.config.language or "auto",
         )
+        if not accessibility_trusted():
+            log.warning("Accessibility is not granted — transcripts will be left on")
+            log.warning("the clipboard instead of pasted. %s", ACCESSIBILITY_HINT)
         log.info("hold the hotkey to dictate; Ctrl+C to quit")
         self.listener.start()
         try:
@@ -76,6 +83,8 @@ class Talkie:
             if self._recording or self._busy:
                 return
             self._recording = True
+        # Cue first, so the mic opens into as little of it as possible.
+        self.sound.start()
         log.info("recording…")
         self.recorder.start()
 
@@ -87,6 +96,7 @@ class Talkie:
             self._busy = True
 
         clip = self.recorder.stop()
+        self.sound.stop()
         if clip.duration < self.config.min_seconds:
             log.info("discarded %.2fs tap", clip.duration)
             with self._lock:
@@ -101,7 +111,7 @@ class Talkie:
             transcript = self.client.transcribe(clip)
             if not transcript.text:
                 log.warning("empty transcript (%.1fs clip)", clip.duration)
-                beep()
+                self.sound.error()
                 return
             self.paster.paste(transcript.text, before=self.listener.wait_until_released)
             cost = f" · ${transcript.cost:.5f}" if transcript.cost is not None else ""
@@ -114,10 +124,10 @@ class Talkie:
             )
         except ClientError as exc:
             log.error("transcription failed: %s", exc)
-            beep()
+            self.sound.error()
         except Exception:  # never let a worker take the process down
             log.exception("unexpected failure while handling a clip")
-            beep()
+            self.sound.error()
         finally:
             with self._lock:
                 self._busy = False

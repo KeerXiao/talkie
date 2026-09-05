@@ -3,7 +3,7 @@
 import pytest
 from pynput import keyboard as kb
 
-from talkie.paste import ALERT_SOUND, Paster, beep
+from talkie.paste import Paster
 
 
 class FakeController:
@@ -29,6 +29,12 @@ class FakeController:
 
     def release(self, key):
         self.events.append(f"release:{key}")
+
+
+@pytest.fixture(autouse=True)
+def trusted(monkeypatch):
+    """Accessibility is granted unless a test says otherwise."""
+    monkeypatch.setattr("talkie.paste.accessibility_trusted", lambda: True)
 
 
 @pytest.fixture
@@ -108,9 +114,17 @@ def test_before_is_optional(clipboard):
     assert "press:v" in controller.events
 
 
-def test_beep_plays_the_system_alert(monkeypatch):
-    calls = []
-    monkeypatch.setattr("talkie.paste.subprocess.run",
-                        lambda cmd, **kw: calls.append(cmd))
-    beep()
-    assert calls == [["afplay", ALERT_SOUND]]
+def test_without_accessibility_the_transcript_is_left_on_the_clipboard(
+    clipboard, monkeypatch, caplog
+):
+    """⌘V would no-op, so restoring the clipboard would destroy the transcript."""
+    monkeypatch.setattr("talkie.paste.accessibility_trusted", lambda: False)
+    paster, controller = build(clipboard)
+
+    with caplog.at_level("ERROR"):
+        paster.paste("hello world")
+
+    assert clipboard["value"] == "hello world"  # still there to paste by hand
+    assert clipboard["log"] == [("write", "hello world")]  # no restore
+    assert controller.events == []  # no pointless keystrokes
+    assert "Accessibility" in caplog.text

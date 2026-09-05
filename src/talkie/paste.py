@@ -3,21 +3,15 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 import time
 from typing import Callable
 
 import pyperclip
 from pynput import keyboard
 
+from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
+
 log = logging.getLogger(__name__)
-
-ALERT_SOUND = "/System/Library/Sounds/Basso.aiff"
-
-
-def beep() -> None:
-    """Audible failure signal — the user is looking at another app."""
-    subprocess.run(["afplay", ALERT_SOUND], check=False)
 
 
 class Paster:
@@ -28,6 +22,15 @@ class Paster:
         self._keyboard = controller or keyboard.Controller()
 
     def paste(self, text: str, before: Callable[[], None] | None = None) -> None:
+        if not accessibility_trusted():
+            # ⌘V would be a silent no-op, and restoring the clipboard
+            # afterwards would throw the transcript away. Leave it staged so
+            # the user can paste it by hand.
+            pyperclip.copy(text)
+            log.error("cannot paste: %s", ACCESSIBILITY_HINT)
+            log.error("transcript left on the clipboard — press ⌘V to insert it")
+            return
+
         try:
             previous = pyperclip.paste()
         except Exception:  # a non-text clipboard (image, file) reads as an error

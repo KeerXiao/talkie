@@ -11,6 +11,7 @@ from talkie.app import Talkie
 from talkie.audio import Recorder
 from talkie.client import ClientError, OpenRouterClient
 from talkie.config import Config, ConfigError
+from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
 
 log = logging.getLogger("talkie")
 
@@ -48,6 +49,10 @@ def check_key(config: Config) -> None:
     limit = info.get("limit")
     remaining = "unlimited" if limit is None else f"{limit - info.get('usage', 0):.2f}"
     log.info("key ok · %s · remaining %s", label, remaining)
+    if accessibility_trusted():
+        log.info("accessibility ok · pasting will work")
+    else:
+        log.warning("accessibility MISSING · %s", ACCESSIBILITY_HINT)
 
 
 def record_once(config: Config, seconds: float) -> None:

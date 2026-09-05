@@ -54,22 +54,34 @@ class FakePaster:
         self.pasted.append(text)
 
 
+class FakePlayer:
+    def __init__(self):
+        self.cues = []
+
+    def start(self):
+        self.cues.append("start")
+
+    def stop(self):
+        self.cues.append("stop")
+
+    def error(self):
+        self.cues.append("error")
+
+
 @pytest.fixture
-def beeps(monkeypatch):
-    recorded = []
-    monkeypatch.setattr("talkie.app.beep", lambda: recorded.append("beep"))
-    return recorded
+def sound():
+    return FakePlayer()
 
 
-def build(recorder=None, client=None, paster=None):
+def build(recorder=None, client=None, paster=None, sound=None):
     config = Config(api_key="sk-test")
-    app = Talkie(
+    return Talkie(
         config,
         recorder=recorder or FakeRecorder(),
         client=client or FakeClient(),
         paster=paster or FakePaster(),
+        sound=sound or FakePlayer(),
     )
-    return app
 
 
 def dictate(app, settle=0.3):
@@ -83,76 +95,80 @@ def dictate(app, settle=0.3):
     time.sleep(settle)
 
 
-def test_dictation_records_transcribes_and_pastes(beeps):
+def test_dictation_records_transcribes_and_pastes(sound):
     recorder, paster = FakeRecorder(), FakePaster()
-    app = build(recorder=recorder, paster=paster)
+    app = build(recorder=recorder, paster=paster, sound=sound)
 
     dictate(app)
 
     assert recorder.events == ["start", "stop"]
     assert paster.pasted == ["hi"]
-    assert beeps == []
+    assert sound.cues == ["start", "stop"]
     assert (app._recording, app._busy) == (False, False)
 
 
-def test_short_tap_makes_no_request(beeps):
+def test_short_tap_makes_no_request(sound):
     recorder = FakeRecorder(duration=0.12)
     client = FakeClient()
-    app = build(recorder=recorder, client=client)
+    app = build(recorder=recorder, client=client, sound=sound)
 
     dictate(app)
 
     assert recorder.events == ["start", "stop"]
     assert client.calls == 0
     assert app._busy is False
+    # the cues still fire: they report the key, not the outcome
+    assert sound.cues == ["start", "stop"]
 
 
-def test_hotkey_is_ignored_while_a_transcription_is_in_flight(beeps):
+def test_hotkey_is_ignored_while_a_transcription_is_in_flight(sound):
     block = threading.Event()
     recorder = FakeRecorder()
-    app = build(recorder=recorder, client=FakeClient(block=block))
+    app = build(recorder=recorder, client=FakeClient(block=block), sound=sound)
 
     dictate(app, settle=0.1)
     assert app._busy is True
 
     dictate(app, settle=0.1)  # second attempt while busy
     assert recorder.events.count("start") == 1
+    assert sound.cues.count("start") == 1  # no cue for an ignored press
 
     block.set()
     time.sleep(0.3)
     assert app._busy is False
 
 
-def test_failed_transcription_beeps_and_pastes_nothing(beeps):
+def test_failed_transcription_beeps_and_pastes_nothing(sound):
     paster = FakePaster()
     app = build(client=FakeClient(error=ServerError("upstream down", 503)),
-                paster=paster)
+                paster=paster, sound=sound)
 
     dictate(app)
 
     assert paster.pasted == []
-    assert beeps == ["beep"]
+    assert sound.cues == ["start", "stop", "error"]
     assert (app._recording, app._busy) == (False, False)
 
 
-def test_empty_transcript_beeps_rather_than_pasting_nothing(beeps):
+def test_empty_transcript_beeps_rather_than_pasting_nothing(sound):
     paster = FakePaster()
-    app = build(client=FakeClient(text=""), paster=paster)
+    app = build(client=FakeClient(text=""), paster=paster, sound=sound)
 
     dictate(app)
 
     assert paster.pasted == []
-    assert beeps == ["beep"]
+    assert sound.cues[-1] == "error"
 
 
-def test_unexpected_worker_failure_is_contained(beeps):
+def test_unexpected_worker_failure_is_contained(sound):
     paster = FakePaster()
-    app = build(client=FakeClient(error=RuntimeError("boom")), paster=paster)
+    app = build(client=FakeClient(error=RuntimeError("boom")), paster=paster,
+                sound=sound)
 
     dictate(app)
 
     assert paster.pasted == []
-    assert beeps == ["beep"]
+    assert sound.cues[-1] == "error"
     assert app._busy is False  # the app stays usable
 
 
@@ -186,3 +202,40 @@ def test_close_stops_an_active_recording():
     recorder.start()
     app.close()
     assert recorder.active is False
+
+
+def test_start_cue_fires_before_the_mic_opens(sound):
+    """Cue first, so the microphone records as little of it as possible."""
+    order = []
+
+    class OrderedRecorder(FakeRecorder):
+        def start(self):
+            order.append("mic")
+            super().start()
+
+    class OrderedPlayer(FakePlayer):
+        def start(self):
+            order.append("cue")
+            super().start()
+
+    app = build(recorder=OrderedRecorder(), sound=OrderedPlayer())
+    dictate(app)
+    assert order[:2] == ["cue", "mic"]
+
+
+def test_stop_cue_fires_after_the_mic_closes(sound):
+    order = []
+
+    class OrderedRecorder(FakeRecorder):
+        def stop(self):
+            order.append("mic")
+            return super().stop()
+
+    class OrderedPlayer(FakePlayer):
+        def stop(self):
+            order.append("cue")
+            super().stop()
+
+    app = build(recorder=OrderedRecorder(), sound=OrderedPlayer())
+    dictate(app)
+    assert order == ["mic", "cue"]

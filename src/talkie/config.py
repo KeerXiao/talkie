@@ -27,6 +27,7 @@ class Config:
     min_seconds: float = 0.3
     request_timeout: float = 30.0
     paste_settle: float = 0.3
+    sound_volume: float = 1.0  # 0 turns the cues off; >1 amplifies
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
@@ -40,4 +41,14 @@ class Config:
             hotkey=env.get("TALKIE_HOTKEY", DEFAULT_HOTKEY),
             # Empty means "let the model auto-detect".
             language=env.get("TALKIE_LANGUAGE", "en") or None,
+            sound_volume=_volume(env.get("TALKIE_SOUND_VOLUME")),
         )
+
+
+def _volume(raw: str | None) -> float:
+    if raw is None or raw == "":
+        return 1.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        raise ConfigError(f"TALKIE_SOUND_VOLUME must be a number (got {raw!r})") from None
