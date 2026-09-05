@@ -1,7 +1,7 @@
 # talkie — common tasks. See README.md for the full story.
 
 .DEFAULT_GOAL := help
-.PHONY: help install test run check record clean
+.PHONY: help install test run check record ui web web-dev clean
 
 SECONDS ?= 3
 
@@ -39,6 +39,15 @@ check: ## Verify the API key and macOS permissions
 
 run: ## Start the hotkey loop (Ctrl+Q to dictate)
 	uv run talkie
+
+ui: ## Run the app — history window plus the menu-bar icon
+	uv run talkie --ui
+
+web: ## Rebuild the history window from ui/ (needs Node; output is committed)
+	cd ui && npm install && npm run build
+
+web-dev: ## Vite dev server for the frontend, with hot reload
+	cd ui && npm run dev
 
 record: ## Record SECONDS and print the transcript, no paste (SECONDS=3)
 	uv run talkie --record $(SECONDS)

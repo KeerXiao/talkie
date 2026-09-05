@@ -239,3 +239,98 @@ def test_stop_cue_fires_after_the_mic_closes(sound):
     app = build(recorder=OrderedRecorder(), sound=OrderedPlayer())
     dictate(app)
     assert order == ["mic", "cue"]
+
+
+# -- history and UI observers (M2) ----------------------------------------
+
+
+def build_observed(tmp_path, client=None, keep=50):
+    """A Talkie wired to real history plus recording observers."""
+    from talkie.history import History
+
+    states, records = [], []
+    app = Talkie(
+        Config(api_key="sk-test"),
+        recorder=FakeRecorder(),
+        client=client or FakeClient(),
+        paster=FakePaster(),
+        sound=FakePlayer(),
+        history=History(root=tmp_path / "h", keep=keep),
+        on_state=states.append,
+        on_record=records.append,
+    )
+    return app, states, records
+
+
+def test_a_successful_dictation_is_written_to_history(tmp_path):
+    app, _, records = build_observed(tmp_path)
+    dictate(app)
+
+    entries = app.history.list()
+    assert len(entries) == 1
+    assert entries[0].text == "hi"
+    assert entries[0].ok
+    assert app.history.audio(entries[0].id) == b"RIFF"
+    assert [e.text for e in records] == ["hi"]
+
+
+def test_a_failed_dictation_is_written_too(tmp_path):
+    app, _, _ = build_observed(tmp_path, client=FakeClient(error=ServerError("boom")))
+    dictate(app)
+
+    entries = app.history.list()
+    assert len(entries) == 1
+    assert not entries[0].ok
+    assert "boom" in entries[0].error
+    # Replayable, which is the whole reason failures are stored.
+    assert app.history.audio(entries[0].id) == b"RIFF"
+
+
+def test_state_transitions_drive_the_icon(tmp_path):
+    app, states, _ = build_observed(tmp_path)
+    dictate(app)
+    assert states == ["recording", "transcribing", "idle"]
+
+
+def test_a_failure_ends_in_the_error_state(tmp_path):
+    app, states, _ = build_observed(tmp_path, client=FakeClient(error=ServerError("x")))
+    dictate(app)
+    assert states[-1] == "error"
+
+
+def test_a_discarded_tap_returns_to_idle_without_history(tmp_path):
+    app, states, _ = build_observed(tmp_path)
+    app.recorder.duration = 0.1  # under min_seconds
+    dictate(app)
+
+    assert states == ["recording", "idle"]
+    assert app.history.list() == []
+
+
+def test_an_exploding_observer_never_breaks_dictation(tmp_path):
+    from talkie.history import History
+
+    def boom(_):
+        raise RuntimeError("bad UI")
+
+    paster = FakePaster()
+    app = Talkie(
+        Config(api_key="sk-test"),
+        recorder=FakeRecorder(),
+        client=FakeClient(),
+        paster=paster,
+        sound=FakePlayer(),
+        history=History(root=tmp_path / "h"),
+        on_state=boom,
+        on_record=boom,
+    )
+    dictate(app)
+    assert paster.pasted == ["hi"]  # the transcript still landed
+
+
+def test_history_is_optional(tmp_path):
+    """The terminal build passes no history and must behave exactly as before."""
+    app = build()
+    assert app.history is None
+    dictate(app)
+    assert app.paster.pasted == ["hi"]

@@ -1,6 +1,6 @@
 # talkie — Cloud Push-to-Talk Dictation Tool
 
-**Spec v0.4 · 2026-09-04**
+**Spec v0.5 · 2026-09-04**
 
 ## 1. Goal
 
@@ -177,8 +177,11 @@ Make the tool usable without a terminal window, and make past interactions inspe
 
 ### 5.2 Shape
 
-- **Menu-bar icon** (`rumps`) is the always-on surface — no dock icon, no main window.
-- **History window** is a TypeScript app rendered in a WebView (`pywebview`, which wraps WKWebView), opened from the menu.
+talkie is a **regular app**: a dock icon, a Cmd-Tab entry, and its window open at launch.
+It keeps a menu-bar icon as well, because the state it reports is only useful while you are typing in some *other* app, with talkie's window behind it.
+
+- **History window** is a TypeScript app rendered in a WebView (`pywebview`, which wraps WKWebView), open at launch and reopened from the dock icon or the menu.
+- **Menu-bar icon** (a raw PyObjC `NSStatusItem`) is the always-on state surface.
 
 ```
 [ 🎙 ]  menu bar
@@ -210,31 +213,44 @@ Alternatives rejected: Electron (~180 MB, and retiring the Python core contradic
 
 ### 5.3 Process architecture
 
-**Decision: two processes.**
-`rumps.App.run()` and `webview.start()` each create and run an `NSApplication` event loop, and macOS permits one per process.
-They cannot share a process without dropping one of them down to raw PyObjC.
-So "Open History…" spawns the window as a child process that exits when its window closes.
+**Decision: one process, and `pywebview` owns the run loop.**
+
+An earlier draft of this spec called for two processes, on the assumption that a menu bar and a WebView could not share one `NSApplication`.
+Three spikes showed that assumption was half right, and the half that was wrong is the half that mattered.
+
+| Spike | Setup | Result |
+|---|---|---|
+| A | `rumps` owns the loop, `webview.start()` called from a menu callback | `start()` **silently returns in ~0.4 s** having done nothing — no window, no exception |
+| B | `webview` owns the loop, menu bar is a raw `NSStatusItem` | both live happily in one process |
+| C | as B, plus a persistent window that hides instead of closing | show → hide → show again all work; the loop survives hiding; `start()` returns only on `destroy()` |
+
+So the conflict is real but one-sided: **`rumps` cannot host a WebView, and it is the replaceable half.**
+`rumps` is dropped. The menu bar is ~40 lines of PyObjC against `NSStatusItem` and `NSMenu`, which is less code than a subprocess, an IPC contract, and their failure modes would have been.
 
 ```
-┌─ daemon (rumps) ─────────┐        ┌─ history window (pywebview) ─┐
-│ hotkey · audio · API     │        │  Api()  ←js_api→  TS/React   │
-│ paste · writes history   │        │  reads + mutates the files   │
-└──────────┬───────────────┘        └──────────────┬───────────────┘
-           │                                       │
-           └──────►  ~/.talkie/history/  ◄─────────┘
-                     20260904T164210Z.{wav,json}
+┌─ one process ────────────────────────────────────────────────┐
+│  main       webview.start()  — the single NSApplication loop │
+│  listener   pynput chord detection                           │
+│  worker     one per clip: transcribe → paste → write history │
+│                                                              │
+│  NSStatusItem ◄── callAfter ──┐                              │
+│  HistoryWindow ◄── js_api ──► TS/React                       │
+└────────────────────────────────┬─────────────────────────────┘
+                                 │
+                        ~/.talkie/history/
+                        20260904T164210Z.{wav,json}
 ```
 
-**The filesystem is the IPC.**
-Every interaction is already a JSON+WAV pair on disk (§5.5), so the window lists a directory rather than speaking a protocol.
-Copy uses `pyperclip` in the window's own process, delete unlinks the pair, and live updates come from polling the directory every ~500 ms.
-There is no socket, no port, and no message format to design or version.
+Two consequences follow from spike C, and both are load-bearing:
 
-The daemon never reads back from the window; the window is a pure consumer plus destructive file operations.
+- **The window is never destroyed until quit.**
+`webview.start()` returns when the last window goes away, and that return would end the process and take the menu bar with it.
+- **Closing the window is intercepted and turned into a hide** (`events.closing` returning `False`).
+Quit therefore has to remove that veto before calling `destroy()`, or the app could never exit.
 
 ### 5.4 The TS ↔ Python bridge
 
-Inside the window process, `pywebview` injects an object into the page and turns every public method into a Promise.
+`pywebview` injects an object into the page and turns every public method into a Promise.
 Arguments and return values cross as JSON.
 
 ```python
@@ -294,23 +310,79 @@ Start with `js_api`; switch only if relaunch-per-edit becomes the bottleneck.
 - Written on the worker thread after transcription returns — success or failure.
 Storage is best-effort: a write error is logged and never blocks the paste.
 
-Because this directory is also the interface to the history window (§5.3), the JSON shape is a contract, not an implementation detail.
-A partially written pair must never be visible: write to a temp name and `os.replace` it into place.
+The JSON shape is a contract rather than an implementation detail: the window renders these fields directly, and older entries written by an older build must still load.
+A partially written pair must never be visible — write to a temp name and `os.replace` it into place, and write the WAV before its JSON so a listable entry always has playable audio behind it.
+Ids arrive back from JavaScript, so they are validated against a strict pattern before ever becoming a path.
 
 ### 5.6 Threading note
 
-`rumps` owns the daemon's main thread (NSApplication run loop); the `pynput` listener and the transcription worker are separate threads.
-All UI mutation — icon and title changes — must be marshalled onto the main thread (a `rumps.Timer` polling a queue, or `performSelectorOnMainThread_`).
-The M1 recording and transcription code must not gain any UI calls; it publishes events onto a queue that the UI drains.
+Three threads, and only one of them may touch AppKit.
 
-In the window process, `webview.start()` owns the main thread and blocks until the window closes, at which point the process exits.
+| Thread | Owns |
+|---|---|
+| main | `webview.start()` — the single `NSApplication` run loop |
+| listener | `pynput` chord detection |
+| worker | one per clip: transcribe, paste, write history |
+
+State changes originate on the worker (a transcription finished) but the icon lives on the main thread, so every mutation is bounced across with `AppHelper.callAfter`.
+The M1 recording and transcription code gains no UI calls: `Talkie` takes optional `on_state` and `on_record` observers and knows nothing about what implements them.
+A raising observer is caught and logged — a broken UI must never stop dictation.
+
+**Quitting, and why it took four fixes.**
+A terminal-launched app that ignores Ctrl+C is unacceptable, and making it work meant unpicking four separate obstacles — each of which looked like the whole problem until the next one appeared.
+
+| # | Obstacle | Fix |
+|---|---|---|
+| 1 | The main thread sits in Cocoa's run loop and executes no Python bytecode, so a pending handler never gets an instruction boundary to run at | a repeating `AppHelper.callLater` tick, 4×/second |
+| 2 | CPython only trips its handler when the signal lands on the **main** thread; delivered elsewhere it is silently dropped | `pthread_sigmask` blocks both signals before any thread is created, so they inherit the block; main is unblocked again from inside the loop |
+| 3 | AppKit resets the main thread's mask while `NSApplication` starts | do the unblock from inside the run loop, not before `webview.start()` |
+| 4 | **Something below Python replaces the SIGINT disposition after startup** — WebKit, by elimination. `signal.signal()` before the loop is silently undone, and `getsignal()` still reports the Python handler, which is what makes this so hard to see | re-register the handlers on every pump tick, reclaiming the disposition |
+
+Obstacle 4 was found by having the app signal *itself* from the main thread inside the loop: the handler was registered, the pump was ticking, delivery was guaranteed — and nothing fired.
+That ruled out every explanation except a C-level override.
+
+Quit therefore has three equivalent paths, all verified end to end: the menu's **Quit talkie** item, Cmd+Q, and SIGINT/SIGTERM.
+`stop()` is idempotent because any of them can arrive.
+
+**The application delegate.**
+Being a regular app means macOS sends two messages a menu-bar accessory never sees, and `pywebview`'s own delegate answers neither correctly.
+So it is replaced from inside the run loop, after `start()` has installed its own.
+
+| Message | pywebview's answer | Why it is wrong here | Ours |
+|---|---|---|---|
+| `applicationShouldTerminate:` | asks the window's `closing` handlers | talkie vetoes closing to keep the run loop alive, so **Cmd+Q would silently do nothing** | run `stop()`, return `TerminateCancel` |
+| `applicationShouldHandleReopen:hasVisibleWindows:` | not implemented | clicking the dock icon of a hidden-window app would do nothing | show the window |
+
+Returning `TerminateNow` is not an option: AppKit would `exit()` without unwinding Python, skipping the listener and recorder teardown.
+Cancelling and destroying the window ourselves returns `webview.start()` and ends the process normally, so every quit route lands on one shutdown path.
+
+`pywebview` already sets `NSApplicationActivationPolicyRegular` during `start()`, which is what we want; it is set again alongside the delegate so nothing depends on that staying true.
+The app still calls `activateIgnoringOtherApps_` when reopening the window, since a background app does not come forward on its own.
+
+**Name and icon.**
+Run from a bare interpreter, macOS calls us `python3` and shows the generic Python icon, because both normally come from an `.app` bundle's `Info.plist` and there is no bundle.
+Only one of the three places this shows was fixable at runtime:
+
+| Surface | Attempt | Result |
+|---|---|---|
+| application menu ("About talkie", "Quit talkie") | `CFBundleName` in the main bundle's info dictionary, set before `start()` builds the menu | ✅ works |
+| dock icon | `setApplicationIconImage_` | ❌ the dock still draws the interpreter's icon |
+| dock label and Cmd-Tab | `LSSetApplicationInformationItem` | ❌ no longer an exported symbol (Darwin 25.5) |
+
+The icon case is worth recording precisely, because it looks like it works from inside the process.
+`applicationIconImage()` reads back the image we set, and no error is raised — but the dock is unchanged.
+An in-process read only echoes the setter, so it is not evidence; the check that mattered was looking at the dock.
+
+Both remaining surfaces therefore need the real bundle in §5.7.
+The drawing code is kept regardless: it is what generates the bundle's `.icns`, so the icon exists and is tested, it just has nowhere to be displayed yet.
 
 ### 5.7 Packaging
 
 M2 ships a real `.app`, because macOS permissions attach to a bundle identity rather than to a script.
 Today the grants are pinned to whatever host app launched talkie (PyCharm, a terminal), which is fragile and confusing — see §7.
 
-- **Builder: `py2app`**, with `LSUIElement = 1` in `Info.plist` so there is a menu-bar icon and no dock icon.
+- **Builder: `py2app`**. `LSUIElement` stays unset — talkie is a regular app and wants its dock icon.
+- **`CFBundleName` and an `.icns`** move into `Info.plist`. Per §5.6 this is the only way to get talkie's own icon and name in the dock at all — every runtime route was tried and only the application menu could be fixed. The `.icns` is generated from `ui/branding.py`, so there is no second copy of the artwork to keep in sync.
 - **`NSMicrophoneUsageDescription` is mandatory** in `Info.plist`; without it the app dies on first microphone access.
 - The built TS bundle (`ui/dist/`) ships as bundle data, so the frontend build is a step in the app build, not a runtime dependency.
 - `sounddevice` ships a PortAudio `.dylib` that `py2app` frequently misses — it needs explicit inclusion, and a bundle that runs from source but fails packaged is almost always this.
@@ -328,7 +400,7 @@ Notarization is only worth it when the tool is handed to someone else.
 
 ### 5.8 Acceptance criteria
 
-1. Launching the app shows a menu-bar icon and no terminal window is needed.
+1. Launching the app opens its window and puts an icon in the dock and the menu bar; no terminal window is needed.
 2. The icon changes to 🔴 while recording and ⏳ while transcribing, and back to 🎙 within one frame of finishing.
 3. After a dictation, the new row appears at the top of the history window within ~1 s, without reopening it.
 4. Copy puts exactly the transcript on the clipboard; Play plays back the original audio with a working scrubber.
@@ -350,10 +422,12 @@ uv run pytest            # 89 tests; no mic, network or permissions needed
 ```
 
 Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`.
-M2 adds `rumps` (menu bar) and `pywebview` (history window), plus a `ui/` Vite + TypeScript project built to `ui/dist/` and shipped as bundle data.
+M2 adds `pywebview` (history window) and PyObjC (menu bar), plus a `ui/` Vite + TypeScript project.
+The frontend builds to a single self-contained `src/talkie/ui/web/index.html`, which is committed, so running talkie never requires Node.
 
 (`sounddevice` needs PortAudio: `brew install portaudio` if the wheel doesn't bundle it.
-`rumps` and `pywebview` both pull in PyObjC; `pywebview` renders through the system WKWebView, so it embeds no browser engine.
+`pywebview` pulls in PyObjC and renders through the system WKWebView, so it embeds no browser engine.
+The frontend is inlined into one HTML file because WebKit blocks ES-module and asset loads over `file://` by CORS.
 No vendor SDK is needed — OpenRouter is one HTTP POST.)
 
 ## 7. macOS permissions
@@ -388,8 +462,8 @@ OpenRouter bills at list price with no per-model subscription, so switching mode
 - Whether to configure an OpenRouter fallback model, so a provider outage degrades to Whisper instead of beeping. Deferred past M1.
 - Whether to add an optional "clean up filler words" post-processing pass (would change verbatim behavior — off by default).
 This would be a second OpenRouter call to a chat model, on the same key.
-- Whether `rumps` and `pywebview` genuinely cannot share a process — §5.3 rests on the one-`NSApplication`-per-process rule, and a ~20 line spike should confirm it before the two-process split is built.
-- Whether polling `~/.talkie/history/` every 500 ms is enough, or the window should watch it with FSEvents — start with polling, since 50 files is nothing.
+- ~~Whether `rumps` and `pywebview` can share a process~~ — **answered by spike, §5.3.** They cannot, but `rumps` is the replaceable half; one process with a raw `NSStatusItem` works. Polling and FSEvents are both moot: the window is pushed to directly.
+- Whether the `js_api` relaunch-per-edit loop becomes annoying enough to justify the loopback HTTP server in §5.4.
 
 ## 10. References
 

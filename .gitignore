@@ -12,6 +12,10 @@ __pycache__/
 .venv/
 venv/
 
+# Node — only needed to rebuild the frontend; the built page is committed.
+node_modules/
+ui/dist/
+
 # Tooling caches
 .pytest_cache/
 .ruff_cache/

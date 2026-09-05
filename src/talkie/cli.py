@@ -29,6 +29,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--check", action="store_true", help="verify the API key and exit"
     )
+    parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="run as a windowed app with history, instead of headless",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return parser.parse_args(argv)
 
@@ -84,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
             check_key(config)
         elif args.record is not None:
             record_once(config, args.record)
+        elif args.ui:
+            # Imported lazily: the terminal build must not need PyObjC or WebKit.
+            from talkie.ui.app import TalkieApp
+
+            TalkieApp(config).run()
         else:
             Talkie(config).run()
     except (ConfigError, ClientError) as exc:

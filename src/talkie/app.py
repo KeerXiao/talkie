@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
+from datetime import datetime, timezone
 
 from talkie.audio import Clip, Recorder
 from talkie.client import ClientError, OpenRouterClient, TranscriptionClient
 from talkie.config import Config
+from talkie.history import History, Interaction
 from talkie.hotkey import ChordListener, parse_hotkey
 from talkie.paste import Paster
 from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
 from talkie.sound import Player
 
 log = logging.getLogger(__name__)
+
+# What the menu-bar icon reflects. Strings, not an enum, because they cross
+# into the UI layer and get rendered directly.
+IDLE = "idle"
+RECORDING = "recording"
+TRANSCRIBING = "transcribing"
+ERROR = "error"
 
 
 class Talkie:
@@ -30,6 +40,9 @@ class Talkie:
         client: TranscriptionClient | None = None,
         paster: Paster | None = None,
         sound: Player | None = None,
+        history: History | None = None,
+        on_state: Callable[[str], None] | None = None,
+        on_record: Callable[[Interaction], None] | None = None,
     ) -> None:
         self.config = config
         self.chord = parse_hotkey(config.hotkey)
@@ -42,11 +55,34 @@ class Talkie:
         )
         self.paster = paster or Paster(config.paste_settle)
         self.sound = sound or Player(config.sound_volume)
+        self.history = history
         self.listener = ChordListener(self.chord, self._on_engage, self._on_disengage)
+
+        # Observers are optional: the terminal build sets neither.
+        self._on_state = on_state
+        self._on_record = on_record
 
         self._lock = threading.Lock()
         self._recording = False
         self._busy = False  # a transcription is in flight
+        self._started_at: datetime | None = None
+
+    def _emit(self, state: str) -> None:
+        """Tell the UI, if there is one. A broken observer must not stop dictation."""
+        if self._on_state is None:
+            return
+        try:
+            self._on_state(state)
+        except Exception:
+            log.exception("state observer failed")
+
+    def _emit_record(self, entry: Interaction | None) -> None:
+        if entry is None or self._on_record is None:
+            return
+        try:
+            self._on_record(entry)
+        except Exception:
+            log.exception("record observer failed")
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -83,8 +119,10 @@ class Talkie:
             if self._recording or self._busy:
                 return
             self._recording = True
+            self._started_at = datetime.now(timezone.utc)
         # Cue first, so the mic opens into as little of it as possible.
         self.sound.start()
+        self._emit(RECORDING)
         log.info("recording…")
         self.recorder.start()
 
@@ -101,17 +139,22 @@ class Talkie:
             log.info("discarded %.2fs tap", clip.duration)
             with self._lock:
                 self._busy = False
+            self._emit(IDLE)
             return
+        self._emit(TRANSCRIBING)
         threading.Thread(target=self._handle, args=(clip,), daemon=True).start()
 
     # -- worker ------------------------------------------------------------
 
     def _handle(self, clip: Clip) -> None:
+        started_at = self._started_at
         try:
             transcript = self.client.transcribe(clip)
             if not transcript.text:
                 log.warning("empty transcript (%.1fs clip)", clip.duration)
                 self.sound.error()
+                self._save(clip, started_at, error="empty transcript")
+                self._emit(ERROR)
                 return
             self.paster.paste(transcript.text, before=self.listener.wait_until_released)
             cost = f" · ${transcript.cost:.5f}" if transcript.cost is not None else ""
@@ -122,12 +165,28 @@ class Talkie:
                 cost,
                 transcript.text,
             )
+            self._save(clip, started_at, transcript=transcript)
+            self._emit(IDLE)
         except ClientError as exc:
             log.error("transcription failed: %s", exc)
             self.sound.error()
+            self._save(clip, started_at, error=str(exc))
+            self._emit(ERROR)
         except Exception:  # never let a worker take the process down
             log.exception("unexpected failure while handling a clip")
             self.sound.error()
+            self._save(clip, started_at, error="unexpected failure")
+            self._emit(ERROR)
         finally:
             with self._lock:
                 self._busy = False
+
+    def _save(self, clip, started_at, transcript=None, error=None) -> None:
+        """Persist the interaction, if this build keeps history."""
+        if self.history is None:
+            return
+        self._emit_record(
+            self.history.record(
+                clip, transcript=transcript, error=error, started_at=started_at
+            )
+        )
