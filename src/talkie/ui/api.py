@@ -1,11 +1,17 @@
-"""The surface the history window calls.
+"""The surface the history window calls — this class *is* the UI's API.
+
+`ui/src/bridge.d.ts` is the TypeScript view of it; the two are kept in step by
+hand, so change both together. (SPEC 5.4.)
+
+Two rules follow from being on the far side of a JavaScript bridge:
+
+  - every public method here is reachable from the page, so adding one widens
+    what the window can do — keep the surface deliberate
+  - every argument is untrusted, and every return value must be JSON
 
 Deliberately free of any pywebview import: pywebview injects this object as
 `window.pywebview.api`, but nothing here knows that, so the same class can be
 served over loopback HTTP instead without touching its body.
-
-Every method is reached from JavaScript, so every argument is untrusted and
-every method returns something JSON-serialisable.
 """
 
 from __future__ import annotations

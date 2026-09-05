@@ -248,58 +248,55 @@ Two consequences follow from spike C, and both are load-bearing:
 - **Closing the window is intercepted and turned into a hide** (`events.closing` returning `False`).
 Quit therefore has to remove that veto before calling `destroy()`, or the app could never exit.
 
-### 5.4 The TS ↔ Python bridge
+### 5.4 The UI ↔ backend boundary
 
-`pywebview` injects an object into the page and turns every public method into a Promise.
-Arguments and return values cross as JSON.
+**`src/talkie/ui/api.py` is the interface.** Its public methods are the whole of what the window can ask for; `ui/src/bridge.d.ts` is the TypeScript view of the same thing.
 
-```python
-# src/talkie/ui/api.py
-class Api:
-    def list_history(self) -> list[dict]: ...   # newest first, no audio payload
-    def clip_audio(self, clip_id: str) -> str: ...  # "data:audio/wav;base64,..."
-    def copy(self, clip_id: str) -> bool: ...
-    def delete(self, clip_id: str) -> bool: ...
-    def clear(self) -> int: ...
+The window is a WebView with no network and no filesystem access, so this boundary is the entire surface between the TypeScript in `ui/` and the Python in `src/talkie/`.
+It has exactly two directions:
 
-webview.create_window("Talkie History", "ui/dist/index.html", js_api=Api())
-webview.start()   # must be the main thread
-```
+| Direction | Mechanism | Lives in |
+|---|---|---|
+| **calls** — UI asks, Python answers | `pywebview` injects `Api` as `window.pywebview.api`, every public method becoming a Promise | `ui/api.py` |
+| **events** — Python tells, UI reacts | `evaluate_js` invokes a function the page registered on `window.talkie` | `ui/window.py` |
 
-```ts
-// ui/src/bridge.d.ts — the one seam with no type checker behind it
-interface TalkieApi {
-  list_history(): Promise<Interaction[]>
-  clip_audio(id: string): Promise<string>
-  copy(id: string): Promise<boolean>
-  delete(id: string): Promise<boolean>
-  clear(): Promise<number>
-}
-declare global { interface Window { pywebview: { api: TalkieApi } } }
-```
+| Call | Returns | |
+|---|---|---|
+| `list_history()` | `Interaction[]` | newest first, no audio |
+| `clip_audio(clip_id)` | `str \| None` | `data:audio/wav;base64,…` |
+| `stats()` | `Stats` | today's totals, local midnight |
+| `copy(clip_id)` | `bool` | mutates the clipboard |
+| `delete(clip_id)` | `bool` | mutates |
+| `clear()` | `int` | mutates |
 
-Three constraints that shape the frontend:
+One event goes the other way: `onHistoryChanged()`, no payload — the UI re-reads through `list_history`, which keeps one path for loading history instead of two.
+
+Three constraints shape the frontend:
 
 | Constraint | Consequence |
 |---|---|
-| `window.pywebview` is injected late | every call is gated on the `pywebviewready` event |
+| `window.pywebview` is injected late | the first load is gated on the `pywebviewready` event |
 | Methods starting with `_` are not exposed | private helpers stay private without extra work |
 | The bridge is JSON only | audio cannot cross as bytes — it is a base64 data URI fetched lazily on ▶, since eager-loading 50 clips would be ~6 MB |
 
-Python pushes to the page in the other direction with `window.evaluate_js`, calling a function the frontend registers:
-
-```python
-window.evaluate_js(f"window.talkie?.onHistoryChanged({json.dumps(ids)})")
-```
+Two things follow from every public method on `Api` being reachable from the page: adding one widens what the window can do, so the surface is kept deliberate; and every argument arriving there is untrusted, which is why history ids are matched against `ID_RE` before they are turned into paths (§5.5).
 
 `js_api` methods run on a `pywebview` worker thread, not the main thread, so anything touching AppKit must be marshalled.
 
-**Escape hatch, if the TS iteration loop hurts.**
-`js_api` requires relaunching the app to see a frontend change.
-The alternative is a loopback `http.server` on `127.0.0.1:<random>` behind a token, with the frontend using plain `fetch()` — which buys `vite dev` with hot reload in a normal browser against the real backend, and lets `<audio src="http://…/clip/ID.wav">` stream instead of carrying base64.
+**`bridge.d.ts` is kept in step by hand.**
+It is the one seam in the project with no type checker behind it — a method renamed in `api.py` fails at runtime, not at build.
+Change the two together.
+
+**Transport is not part of the interface.**
+`Api` imports nothing from `pywebview`, so the same class can be served over loopback HTTP without its body changing.
+That is the escape hatch if the TS iteration loop hurts: `js_api` requires relaunching the app to see a frontend change, whereas an `http.server` on `127.0.0.1:<random>` behind a token buys `vite dev` with hot reload against the real backend, and lets `<audio src="http://…/clip/ID.wav">` stream instead of carrying base64.
 It costs an open port and a token to guard it.
-`Api` is therefore written standalone, importing nothing from `pywebview`, so it can be wrapped by an HTTP handler instead of injected without touching its body.
 Start with `js_api`; switch only if relaunch-per-edit becomes the bottleneck.
+
+**Known asymmetry.**
+The backend tracks four states — idle, recording, transcribing, error — and pushes them to the menu bar, but there is no event carrying them to the window.
+So a window left open during a dictation shows nothing until the finished row appears.
+An `onState` event is the natural fix; it is not in yet because nothing in the UI consumes it.
 
 ### 5.5 Storage
 

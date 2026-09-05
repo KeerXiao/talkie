@@ -174,7 +174,8 @@ src/talkie/
 ├── config.py       environment → Config
 ├── cli.py          argument parsing and wiring
 ├── client/         OpenRouter HTTP — nothing above this imports requests
-└── ui/             window host (pywebview), menu bar + dock + icon (PyObjC), js_api bridge
+└── ui/             api.py — the interface the window calls
+                    window host (pywebview), menu bar + dock + icon (PyObjC)
 ui/                 the history window's TypeScript source (Vite)
 ```
 
