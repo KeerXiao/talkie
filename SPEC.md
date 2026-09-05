@@ -61,16 +61,35 @@ M2 adds a UI layer on top of M1's functions; it does not change the recording or
 hold Ctrl+Q ──► record mic ──► release ──► POST WAV to OpenRouter ──► paste text at cursor
 ```
 
-Single file `talkie.py`, ~120–150 lines.
+An installable package under `src/talkie/`, driven by the `talkie` console script.
+Each module owns one concern and depends only on the ones below it, so a backend or UI swap touches one file.
 
-| Function | Responsibility | Library |
+| Module | Responsibility | Key types |
 |---|---|---|
-| `start_recording()` | Open 16 kHz mono mic stream on hotkey-down; append chunks to a list | `sounddevice`, `numpy` |
-| `stop_recording() -> bytes` | Close stream on hotkey-up; pack chunks into an in-memory WAV | `wave` (stdlib), `io` |
-| `transcribe(wav_bytes) -> str` | Base64 the WAV, POST to OpenRouter, return `text` | `requests`, `base64` |
-| `paste_text(text)` | Save clipboard → set clipboard to text → simulate ⌘V → restore clipboard | `pyperclip`, `pynput` |
-| `on_press` / `on_release` | Hotkey handlers; on release, run transcribe+paste in a worker thread | `pynput`, `threading` |
-| `main()` | Load `OPENROUTER_API_KEY` from env, start keyboard listener, block | — |
+| `config.py` | Resolve env vars once at startup; fail fast on a missing key | `Config`, `ConfigError` |
+| `audio.py` | Mic capture → in-memory 16 kHz mono WAV | `Recorder`, `Clip` |
+| `hotkey.py` | Chord parsing, macOS key normalisation, engage/disengage edges | `Chord`, `ChordListener` |
+| `client/` | Backend layer: HTTP, auth, error mapping, retries | `TranscriptionClient`, `OpenRouterClient`, `Transcript`, `ClientError` |
+| `paste.py` | Clipboard borrow → ⌘V → restore; failure beep | `Paster`, `beep()` |
+| `app.py` | Wire the above into the push-to-talk loop; own the busy/recording state | `Talkie` |
+| `cli.py` | Argument parsing, logging setup, entry point | `main()` |
+
+Dependencies are injected into `Talkie`, so the state machine is tested against fake recorder/client/paster objects with no mic, network, or Accessibility grant.
+M2 attaches its UI to `app.py` alone.
+
+Tests sit beside the code they cover, Go style: `hotkey.py` and `hotkey_test.py` are neighbours.
+`pyproject.toml` excludes `**/*_test.py` from the wheel so they never ship.
+
+The backend lives behind `talkie/client/`:
+
+| File | Holds |
+|---|---|
+| `client/base.py` | `TranscriptionClient` protocol and the `Transcript` value type — the seam another backend implements |
+| `client/errors.py` | `ClientError` and its subclasses, each carrying `.status` and `.retryable` |
+| `client/openrouter.py` | `OpenRouterClient`: request envelope, status→exception mapping, bounded retries |
+
+Nothing above `client/` imports `requests` or sees an HTTP status.
+`OpenRouterClient` accepts a `requests.Session` and a `base_url`, so the request shape and every failure path are asserted without a live call.
 
 ### 4.3 OpenRouter backend
 
@@ -113,8 +132,10 @@ Overridable by `TALKIE_HOTKEY`.
 One recording at a time; ignore hotkey-down while a request is in flight.
 - **Clip guard:** discard recordings shorter than 0.3 s (accidental taps) — no API call.
 - **Timeout:** 30 s on the HTTP request; a hung network fails as an error rather than wedging the app.
-- **Errors:** on API/network failure, log the status and response body to the terminal and play the system alert sound (`afplay`/`NSBeep`).
-Never paste error text.
+- **Errors:** the client maps each failure to a type — `AuthError` (401/403), `InsufficientCreditsError` (402), `RateLimitError` (429), `ServerError` (5xx), `NetworkError`, `ResponseError`.
+`app.py` logs the message and plays the system alert sound (`afplay`); error text is never pasted.
+- **Retries:** the client retries only what a second attempt can fix — rate limits, 5xx and transport failures — twice, with 0.5 s then 1 s backoff.
+A bad key or an empty account fails immediately rather than making the user wait.
 - **Config:** env vars only.
 
   | Var | Default | Purpose |
@@ -194,12 +215,16 @@ The M1 recording and transcription code must not gain any UI calls; it publishes
 
 ## 6. Dependencies
 
+```sh
+uv sync                  # installs the package and its deps into .venv
+uv run talkie            # hotkey loop
+uv run talkie --check    # verify the API key and exit
+uv run talkie --record 3 # dev aid: record 3s, print the transcript, no paste
+uv run pytest            # 75 tests; no mic, network or permissions needed
 ```
-# M1
-pip install sounddevice numpy requests pynput pyperclip
-# M2 adds
-pip install rumps
-```
+
+Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`.
+M2 adds `rumps`.
 
 (`sounddevice` needs PortAudio: `brew install portaudio` if the wheel doesn't bundle it.
 `rumps` pulls in PyObjC, which the history window also uses.
