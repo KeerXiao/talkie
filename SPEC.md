@@ -1,6 +1,6 @@
 # talkie — Cloud Push-to-Talk Dictation Tool
 
-**Spec v0.3 · 2026-09-04**
+**Spec v0.4 · 2026-09-04**
 
 ## 1. Goal
 
@@ -158,7 +158,7 @@ A bad key or an empty account fails immediately rather than making the user wait
   | `TALKIE_MODEL` | `microsoft/mai-transcribe-2` | OpenRouter model ID |
   | `TALKIE_HOTKEY` | `ctrl+q` | Push-to-talk chord |
   | `TALKIE_LANGUAGE` | `en` | Passed through as `language`; unset to let the model auto-detect |
-| `TALKIE_SOUND_VOLUME` | `1.0` | Multiplies system output volume; `0` off, `>1` amplifies |
+  | `TALKIE_SOUND_VOLUME` | `1.0` | Multiplies system output volume; `0` off, `>1` amplifies |
 
 ### 4.5 Acceptance criteria
 
@@ -178,7 +178,7 @@ Make the tool usable without a terminal window, and make past interactions inspe
 ### 5.2 Shape
 
 - **Menu-bar icon** (`rumps`) is the always-on surface — no dock icon, no main window.
-- **History window** (native, via PyObjC — already a `rumps` dependency) opens from the menu.
+- **History window** is a TypeScript app rendered in a WebView (`pywebview`, which wraps WKWebView), opened from the menu.
 
 ```
 [ 🎙 ]  menu bar
@@ -202,7 +202,90 @@ History window — newest first, one row per interaction:
 Failed interactions appear too, with the error in place of the transcript, so a bad clip can be replayed and diagnosed.
 Window footer carries a **Clear history** action.
 
-### 5.3 Storage
+**Why TypeScript in a WebView rather than a native `NSTableView`.**
+The window is a scrolling list of text plus a play button, which HTML does in a fraction of the code that `NSTableViewDataSource` needs, and `<audio controls>` supplies seeking for free.
+Search, virtual scrolling, and waveform rendering all stay cheap if they are ever wanted.
+The cost is one dependency, a hand-maintained type declaration at the bridge, and chrome that is styled rather than native.
+Alternatives rejected: Electron (~180 MB, and retiring the Python core contradicts §2), and a Tauri or Wails shell with a Python sidecar (TCC attribution does not cross to a sidecar for free — it must carry the same Team ID and `com.apple.security.inherit`, which is a lot of machinery for a personal tool).
+
+### 5.3 Process architecture
+
+**Decision: two processes.**
+`rumps.App.run()` and `webview.start()` each create and run an `NSApplication` event loop, and macOS permits one per process.
+They cannot share a process without dropping one of them down to raw PyObjC.
+So "Open History…" spawns the window as a child process that exits when its window closes.
+
+```
+┌─ daemon (rumps) ─────────┐        ┌─ history window (pywebview) ─┐
+│ hotkey · audio · API     │        │  Api()  ←js_api→  TS/React   │
+│ paste · writes history   │        │  reads + mutates the files   │
+└──────────┬───────────────┘        └──────────────┬───────────────┘
+           │                                       │
+           └──────►  ~/.talkie/history/  ◄─────────┘
+                     20260904T164210Z.{wav,json}
+```
+
+**The filesystem is the IPC.**
+Every interaction is already a JSON+WAV pair on disk (§5.5), so the window lists a directory rather than speaking a protocol.
+Copy uses `pyperclip` in the window's own process, delete unlinks the pair, and live updates come from polling the directory every ~500 ms.
+There is no socket, no port, and no message format to design or version.
+
+The daemon never reads back from the window; the window is a pure consumer plus destructive file operations.
+
+### 5.4 The TS ↔ Python bridge
+
+Inside the window process, `pywebview` injects an object into the page and turns every public method into a Promise.
+Arguments and return values cross as JSON.
+
+```python
+# src/talkie/ui/api.py
+class Api:
+    def list_history(self) -> list[dict]: ...   # newest first, no audio payload
+    def clip_audio(self, clip_id: str) -> str: ...  # "data:audio/wav;base64,..."
+    def copy(self, clip_id: str) -> bool: ...
+    def delete(self, clip_id: str) -> bool: ...
+    def clear(self) -> int: ...
+
+webview.create_window("Talkie History", "ui/dist/index.html", js_api=Api())
+webview.start()   # must be the main thread
+```
+
+```ts
+// ui/src/bridge.d.ts — the one seam with no type checker behind it
+interface TalkieApi {
+  list_history(): Promise<Interaction[]>
+  clip_audio(id: string): Promise<string>
+  copy(id: string): Promise<boolean>
+  delete(id: string): Promise<boolean>
+  clear(): Promise<number>
+}
+declare global { interface Window { pywebview: { api: TalkieApi } } }
+```
+
+Three constraints that shape the frontend:
+
+| Constraint | Consequence |
+|---|---|
+| `window.pywebview` is injected late | every call is gated on the `pywebviewready` event |
+| Methods starting with `_` are not exposed | private helpers stay private without extra work |
+| The bridge is JSON only | audio cannot cross as bytes — it is a base64 data URI fetched lazily on ▶, since eager-loading 50 clips would be ~6 MB |
+
+Python pushes to the page in the other direction with `window.evaluate_js`, calling a function the frontend registers:
+
+```python
+window.evaluate_js(f"window.talkie?.onHistoryChanged({json.dumps(ids)})")
+```
+
+`js_api` methods run on a `pywebview` worker thread, not the main thread, so anything touching AppKit must be marshalled.
+
+**Escape hatch, if the TS iteration loop hurts.**
+`js_api` requires relaunching the app to see a frontend change.
+The alternative is a loopback `http.server` on `127.0.0.1:<random>` behind a token, with the frontend using plain `fetch()` — which buys `vite dev` with hot reload in a normal browser against the real backend, and lets `<audio src="http://…/clip/ID.wav">` stream instead of carrying base64.
+It costs an open port and a token to guard it.
+`Api` is therefore written standalone, importing nothing from `pywebview`, so it can be wrapped by an HTTP handler instead of injected without touching its body.
+Start with `js_api`; switch only if relaunch-per-edit becomes the bottleneck.
+
+### 5.5 Storage
 
 - Location: `~/.talkie/history/`.
 - One pair of files per interaction, named by UTC timestamp: `20260904T164210Z.wav` and `20260904T164210Z.json`.
@@ -211,22 +294,50 @@ Window footer carries a **Clear history** action.
 - Written on the worker thread after transcription returns — success or failure.
 Storage is best-effort: a write error is logged and never blocks the paste.
 
-### 5.4 Threading note
+Because this directory is also the interface to the history window (§5.3), the JSON shape is a contract, not an implementation detail.
+A partially written pair must never be visible: write to a temp name and `os.replace` it into place.
 
-`rumps` owns the main thread (NSApplication run loop); the `pynput` listener and the transcription worker are separate threads.
-All UI mutation — icon/title changes, history rows — must be marshalled onto the main thread (a `rumps.Timer` polling a queue, or `performSelectorOnMainThread_`).
+### 5.6 Threading note
+
+`rumps` owns the daemon's main thread (NSApplication run loop); the `pynput` listener and the transcription worker are separate threads.
+All UI mutation — icon and title changes — must be marshalled onto the main thread (a `rumps.Timer` polling a queue, or `performSelectorOnMainThread_`).
 The M1 recording and transcription code must not gain any UI calls; it publishes events onto a queue that the UI drains.
 
-### 5.5 Acceptance criteria
+In the window process, `webview.start()` owns the main thread and blocks until the window closes, at which point the process exits.
+
+### 5.7 Packaging
+
+M2 ships a real `.app`, because macOS permissions attach to a bundle identity rather than to a script.
+Today the grants are pinned to whatever host app launched talkie (PyCharm, a terminal), which is fragile and confusing — see §7.
+
+- **Builder: `py2app`**, with `LSUIElement = 1` in `Info.plist` so there is a menu-bar icon and no dock icon.
+- **`NSMicrophoneUsageDescription` is mandatory** in `Info.plist`; without it the app dies on first microphone access.
+- The built TS bundle (`ui/dist/`) ships as bundle data, so the frontend build is a step in the app build, not a runtime dependency.
+- `sounddevice` ships a PortAudio `.dylib` that `py2app` frequently misses — it needs explicit inclusion, and a bundle that runs from source but fails packaged is almost always this.
+
+Signing tiers, in the order they are likely to be wanted:
+
+| Tier | Cost | Effect |
+|---|---|---|
+| unsigned / ad-hoc | free | the signature hash changes every build, so **TCC grants go stale silently** — the exact failure mode of §7 |
+| self-signed cert in the login keychain | free | stable identity, so Microphone/Accessibility/Input Monitoring grants survive rebuilds |
+| Developer ID + notarization | $99/yr | anyone can run it with no Gatekeeper warning |
+
+**M2 targets the self-signed tier.**
+Notarization is only worth it when the tool is handed to someone else.
+
+### 5.8 Acceptance criteria
 
 1. Launching the app shows a menu-bar icon and no terminal window is needed.
 2. The icon changes to 🔴 while recording and ⏳ while transcribing, and back to 🎙 within one frame of finishing.
-3. After a dictation, the new row appears at the top of the history window with the correct transcript and duration.
-4. Copy puts exactly the transcript on the clipboard; Play plays back the original audio.
+3. After a dictation, the new row appears at the top of the history window within ~1 s, without reopening it.
+4. Copy puts exactly the transcript on the clipboard; Play plays back the original audio with a working scrubber.
 5. A failed transcription still produces a row, marked with its error, whose audio is playable.
 6. The menu's daily total matches the sum of `usage.cost` across today's history entries.
 7. After 60 dictations, `~/.talkie/history/` holds exactly 50 pairs.
-8. Quit from the menu stops the listener and closes the mic stream cleanly.
+8. Closing the history window leaves the daemon running and dictation working; reopening it works a second time.
+9. Quit from the menu stops the listener, closes the mic stream, and leaves no orphaned window process.
+10. The signed `.app` holds its own entries under Microphone, Accessibility, and Input Monitoring, and those entries survive a rebuild and relaunch.
 
 ## 6. Dependencies
 
@@ -235,14 +346,14 @@ uv sync                  # installs the package and its deps into .venv
 uv run talkie            # hotkey loop
 uv run talkie --check    # verify the API key and permissions, then exit
 uv run talkie --record 3 # dev aid: record 3s, print the transcript, no paste
-uv run pytest            # 80 tests; no mic, network or permissions needed
+uv run pytest            # 89 tests; no mic, network or permissions needed
 ```
 
 Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`.
-M2 adds `rumps`.
+M2 adds `rumps` (menu bar) and `pywebview` (history window), plus a `ui/` Vite + TypeScript project built to `ui/dist/` and shipped as bundle data.
 
 (`sounddevice` needs PortAudio: `brew install portaudio` if the wheel doesn't bundle it.
-`rumps` pulls in PyObjC, which the history window also uses.
+`rumps` and `pywebview` both pull in PyObjC; `pywebview` renders through the system WKWebView, so it embeds no browser engine.
 No vendor SDK is needed — OpenRouter is one HTTP POST.)
 
 ## 7. macOS permissions
@@ -277,7 +388,8 @@ OpenRouter bills at list price with no per-model subscription, so switching mode
 - Whether to configure an OpenRouter fallback model, so a provider outage degrades to Whisper instead of beeping. Deferred past M1.
 - Whether to add an optional "clean up filler words" post-processing pass (would change verbatim behavior — off by default).
 This would be a second OpenRouter call to a chat model, on the same key.
-- Whether M2 should ship as a bundled `.app` (py2app) or stay a `python talkie.py` launch — deferred until the menu-bar UI works.
+- Whether `rumps` and `pywebview` genuinely cannot share a process — §5.3 rests on the one-`NSApplication`-per-process rule, and a ~20 line spike should confirm it before the two-process split is built.
+- Whether polling `~/.talkie/history/` every 500 ms is enough, or the window should watch it with FSEvents — start with polling, since 50 files is nothing.
 
 ## 10. References
 
@@ -288,3 +400,5 @@ This would be a second OpenRouter call to a chat model, on the same key.
 - Handy (local-only, Rust/Tauri) — https://github.com/cjpais/Handy
 - OpenWhispr (open source, BYOK cloud) — https://github.com/OpenWhispr/openwhispr
 - rumps (macOS menu-bar apps in Python) — https://github.com/jaredks/rumps
+- pywebview (native WebView windows for Python) — https://pywebview.flowrl.com/
+- py2app — https://py2app.readthedocs.io/
