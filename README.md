@@ -10,6 +10,39 @@ No window, no dock icon, no "upload a file and wait".
      release                          ~1 s
 ```
 
+## Quick start
+
+```sh
+git clone https://github.com/KeerXiao/talkie.git
+cd talkie
+make install                                # deps, and PortAudio if it's missing
+
+export OPENROUTER_API_KEY="sk-or-v1-..."    # https://openrouter.ai/keys — $5 lasts months
+
+make check                                  # confirms the key and the permissions
+make run                                    # hold Ctrl+Q, talk, release
+```
+
+`make check` will tell you if macOS hasn't granted the permissions yet.
+It needs three of them, they're independent, and two fail *silently* — [read this](#the-three-macos-permissions) before assuming the tool is broken.
+
+You need [uv](https://docs.astral.sh/uv/) and Python 3.12+.
+`make install` will point you at the one-line uv installer if it's missing.
+
+### Every command
+
+| Command | What it does |
+|---|---|
+| `make install` | Install dependencies (and PortAudio via Homebrew if needed) |
+| `make check` | Verify the API key and macOS permissions, then exit |
+| `make run` | Start the hotkey loop |
+| `make record` | Record 3 s and print the transcript — no hotkey, no paste. `SECONDS=10` to change |
+| `make test` | Run the test suite |
+| `make clean` | Remove caches and build output |
+| `make` | List all of the above |
+
+`make record` is the fastest way to test your microphone and the model without dealing with Accessibility at all.
+
 ## Why
 
 Local dictation tools ([Handy](https://github.com/cjpais/Handy), MacWhisper) run Whisper or Parakeet on your machine.
@@ -30,40 +63,11 @@ At current prices this costs about **$0.10 per hour of speech** — a heavy day 
 Today talkie runs from a terminal.
 The design for the menu-bar app is written up in [SPEC.md](SPEC.md) §5.
 
-## Requirements
-
-- macOS (the hotkey, clipboard and paste paths are all macOS-specific)
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
-- An [OpenRouter API key](https://openrouter.ai/keys) with a little credit on it
-
-## Install
-
-```sh
-git clone https://github.com/KeerXiao/talkie.git
-cd talkie
-uv sync
-```
-
-If `sounddevice` can't find PortAudio, install it: `brew install portaudio`.
-
-Then set your key:
-
-```sh
-export OPENROUTER_API_KEY="sk-or-v1-..."
-```
-
-Check that the key works before blaming anything else:
-
-```sh
-uv run talkie --check
-```
-
-## Grant the three macOS permissions
+## The three macOS permissions
 
 This is the part that will actually cost you time, so it's worth reading.
 
-talkie needs **three separate grants** under  System Settings → Privacy & Security.
+talkie needs **three separate grants** under System Settings → Privacy & Security.
 They are independent, and each one fails in a completely different way:
 
 | Permission | Needed for | If it's missing |
@@ -84,13 +88,9 @@ The Accessibility case is nasty enough that talkie checks for it explicitly.
 Without the check, talkie would copy your transcript, press ⌘V into the void, and then politely restore your old clipboard 0.3 s later — destroying the text you just paid for.
 Instead, when Accessibility is missing it leaves the transcript on the clipboard, tells you so, and lets you paste it by hand.
 
-## Run
+## Using it
 
-```sh
-uv run talkie
-```
-
-Then, in any app:
+With `make run` going, in any app:
 
 1. **Hold** Ctrl+Q.
    You'll hear a click, and recording starts.
@@ -101,16 +101,6 @@ Then, in any app:
 Taps shorter than 0.3 s are ignored, so a stray keypress costs nothing.
 Your previous clipboard contents are restored after the paste.
 Failures beep and log — error text is never pasted into your document.
-
-Other commands:
-
-```sh
-uv run talkie --check       # verify the API key and permissions, then exit
-uv run talkie --record 3    # record 3 s and print the transcript, no hotkey or paste
-uv run talkie -v            # debug logging
-```
-
-`--record` is the fastest way to test the microphone and the model without dealing with Accessibility at all.
 
 ## Configuration
 
@@ -139,7 +129,7 @@ Switching is just `export TALKIE_MODEL=...` — same code path, same request sha
 ## Development
 
 ```sh
-uv run pytest      # 89 tests — no microphone, network, or permissions needed
+make test      # 89 tests — no microphone, network, or permissions needed
 ```
 
 Tests live **beside the code they test**, Go-style: `audio.py` next to `audio_test.py`.
