@@ -1,7 +1,7 @@
 """The surface the history window calls — this class *is* the UI's API.
 
 `ui/src/bridge.d.ts` is the TypeScript view of it; the two are kept in step by
-hand, so change both together. (SPEC 5.4.)
+hand, so change both together. (DESIGN 5.)
 
 Two rules follow from being on the far side of a JavaScript bridge:
 

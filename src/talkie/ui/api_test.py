@@ -143,7 +143,7 @@ def test_stats_on_an_empty_history(api):
 
 
 def test_api_does_not_import_pywebview():
-    """It must stay swappable for a loopback HTTP handler (SPEC 5.4)."""
+    """It must stay swappable for a loopback HTTP handler (DESIGN 5)."""
     import ast
     import inspect
 

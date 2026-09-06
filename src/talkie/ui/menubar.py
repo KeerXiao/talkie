@@ -2,7 +2,7 @@
 
 rumps is not used. It runs its own NSApplication loop, and pywebview needs
 that loop for the history window — with rumps driving, webview.start() returns
-in ~0.4s having silently done nothing. See SPEC 5.3.
+in ~0.4s having silently done nothing. See DESIGN 4.
 
 AppKit is not thread-safe: state changes arrive from the transcription worker,
 so every mutation is bounced onto the main thread with callAfter.

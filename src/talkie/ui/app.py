@@ -4,7 +4,7 @@ A regular app — dock icon, Cmd-Tab entry, window at launch — that also keeps
 menu-bar item, because the recording indicator has to be visible while you are
 in another app and talkie's window is behind it.
 
-Thread layout, which the spikes in SPEC 5.3 pinned down:
+Thread layout, which the spikes in DESIGN 4 pinned down:
 
     main         webview.start() — the single NSApplication run loop
     listener     pynput chord detection

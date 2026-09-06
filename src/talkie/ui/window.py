@@ -3,7 +3,7 @@
 Shown at launch and toggled from the menu bar thereafter. It is never
 destroyed until quit, because webview.start() returns when the last window
 goes away — and that return would end the process. Closing the window is
-therefore intercepted and turned into a hide. (SPEC 5.3.)
+therefore intercepted and turned into a hide. (DESIGN 4.)
 """
 
 from __future__ import annotations

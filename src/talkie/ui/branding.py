@@ -14,7 +14,7 @@ The name has to be set before pywebview builds the menu during start(); the
 icon can go in at the same time. pywebview does the same trick on the same
 dictionary for its own keys, so the dictionary really is mutable.
 
-This stops mattering once talkie ships as an .app (SPEC 5.7) — the bundle will
+This stops mattering once talkie ships as an .app (DESIGN 9) — the bundle will
 carry both. Until then the drawing is done in code so there is no binary asset
 to keep in sync with it.
 """

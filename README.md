@@ -189,12 +189,15 @@ Everything is injected rather than imported at the point of use, so the whole fl
 - **macOS only.** The hotkey, paste and cue layers all assume it.
 - **No maximum recording length.** If a key-release event is ever missed, talkie keeps recording. Bounded in M2.
 - **Push-to-talk only** — no toggle mode, no streaming, no partial results.
-- **Not a bundled `.app` yet.** It runs from a terminal, so macOS attributes permissions to your terminal rather than to talkie. [SPEC.md](SPEC.md) §5.7 has the py2app plan.
+- **Not a bundled `.app` yet.** It runs from a terminal, so macOS attributes permissions to your terminal rather than to talkie. [DESIGN.md](DESIGN.md) §9 has the packaging plan.
 - **Your audio leaves your machine.** That's the entire premise. If that's not acceptable, use a local tool.
 
-## Design
+## Spec and design
 
-[SPEC.md](SPEC.md) carries the full design: milestones, the OpenRouter request contract, the error and retry model, why the audio cues are fired the way they are, and the M2 architecture.
+[SPEC.md](SPEC.md) is the requirements: what talkie has to do, the milestones, the configuration surface, and the acceptance criteria.
+Short by design.
+
+[DESIGN.md](DESIGN.md) is how it is built: the module map, the OpenRouter request contract, the error and retry model, why the audio cues are fired the way they are, the UI process architecture and its spikes, and the shutdown story.
 
 ## License
 
