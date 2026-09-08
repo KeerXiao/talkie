@@ -26,6 +26,7 @@ from talkie.app import IDLE, Talkie
 from talkie.config import Config
 from talkie.history import History, Interaction
 from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
+from talkie.settings import Settings, SettingsStore
 from talkie.ui import branding, dock
 from talkie.ui.api import Api
 from talkie.ui.menubar import MenuBar
@@ -37,10 +38,25 @@ log = logging.getLogger(__name__)
 class TalkieApp:
     """Wires the pieces together and owns the process lifetime."""
 
-    def __init__(self, config: Config, history: History | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        history: History | None = None,
+        settings: Settings | None = None,
+        store: SettingsStore | None = None,
+    ) -> None:
+        # `config` already carries the saved settings — cli.py resolves them
+        # before constructing anything, so the client, the history cap and the
+        # menu bar all start from the same numbers.
         self.config = config
-        self.history = history or History()
-        self.api = Api(self.history)
+        self.settings = settings or Settings.from_config(config)
+        self.history = history or History(keep=config.history_keep)
+        self.api = Api(
+            self.history,
+            settings=self.settings,
+            store=store,
+            on_settings_changed=self._on_settings,
+        )
         self.window = HistoryWindow(self.api)
         self.menubar: MenuBar | None = None
         self._delegate = None  # AppKit does not retain the app delegate
@@ -68,6 +84,18 @@ class TalkieApp:
             self.menubar.set_stats(self.api.stats())
         self.window.refresh()
 
+    def _on_settings(self, settings: Settings) -> None:
+        """The settings page saved. Runs on the bridge thread, not the main one.
+
+        Talkie.apply only rebinds attributes, and MenuBar marshals its own
+        updates onto the main thread, so nothing here needs a callAfter.
+        """
+        self.settings = settings
+        self.config = settings.apply_to(self.config)
+        self.talkie.apply(self.config)
+        if self.menubar is not None:
+            self.menubar.set_model(self.config.model, self.config.language)
+
     # -- lifecycle ---------------------------------------------------------
 
     def run(self) -> None:
@@ -87,6 +115,7 @@ class TalkieApp:
         self.menubar = MenuBar(
             hotkey=str(self.talkie.chord),
             model=self.config.model,
+            language=self.config.language,
             on_open_history=self.show_history,
             on_quit=self.stop,
         )

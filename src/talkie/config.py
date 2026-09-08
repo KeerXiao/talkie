@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 DEFAULT_MODEL = "microsoft/mai-transcribe-2"
 DEFAULT_HOTKEY = "ctrl+q"
+DEFAULT_HISTORY_KEEP = 50
 
 
 class ConfigError(Exception):
@@ -28,6 +29,7 @@ class Config:
     request_timeout: float = 30.0
     paste_settle: float = 0.3
     sound_volume: float = 1.0  # 0 turns the cues off; >1 amplifies
+    history_keep: int = DEFAULT_HISTORY_KEEP
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
@@ -42,6 +44,7 @@ class Config:
             # Empty means "let the model auto-detect".
             language=env.get("TALKIE_LANGUAGE", "en") or None,
             sound_volume=_volume(env.get("TALKIE_SOUND_VOLUME")),
+            history_keep=_keep(env.get("TALKIE_HISTORY_KEEP")),
         )
 
 
@@ -52,3 +55,14 @@ def _volume(raw: str | None) -> float:
         return max(0.0, float(raw))
     except ValueError:
         raise ConfigError(f"TALKIE_SOUND_VOLUME must be a number (got {raw!r})") from None
+
+
+def _keep(raw: str | None) -> int:
+    if raw is None or raw == "":
+        return DEFAULT_HISTORY_KEEP
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        raise ConfigError(
+            f"TALKIE_HISTORY_KEEP must be a whole number (got {raw!r})"
+        ) from None

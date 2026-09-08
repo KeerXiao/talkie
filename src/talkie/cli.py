@@ -12,6 +12,7 @@ from talkie.audio import Recorder
 from talkie.client import ClientError, OpenRouterClient
 from talkie.config import Config, ConfigError
 from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
+from talkie.settings import resolve
 
 log = logging.getLogger("talkie")
 
@@ -84,7 +85,10 @@ def main(argv: list[str] | None = None) -> int:
     # -v is for talkie's own tracing, not urllib3's connection chatter.
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     try:
-        config = Config.from_env()
+        # The settings page writes ~/.talkie/settings.json; both builds layer
+        # it over the environment here, so `make run` and `make ui` never
+        # disagree about which model or language is in use.
+        config, settings = resolve(Config.from_env())
         if args.check:
             check_key(config)
         elif args.record is not None:
@@ -93,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             # Imported lazily: the terminal build must not need PyObjC or WebKit.
             from talkie.ui.app import TalkieApp
 
-            TalkieApp(config).run()
+            TalkieApp(config, settings=settings).run()
         else:
             Talkie(config).run()
     except (ConfigError, ClientError) as exc:

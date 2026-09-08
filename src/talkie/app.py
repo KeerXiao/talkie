@@ -26,6 +26,15 @@ TRANSCRIBING = "transcribing"
 ERROR = "error"
 
 
+def _openrouter(config: Config) -> TranscriptionClient:
+    return OpenRouterClient(
+        api_key=config.api_key,
+        model=config.model,
+        language=config.language,
+        timeout=config.request_timeout,
+    )
+
+
 class Talkie:
     """Hold the chord to record; release to transcribe and paste.
 
@@ -43,16 +52,16 @@ class Talkie:
         history: History | None = None,
         on_state: Callable[[str], None] | None = None,
         on_record: Callable[[Interaction], None] | None = None,
+        client_factory: Callable[[Config], TranscriptionClient] | None = None,
     ) -> None:
         self.config = config
         self.chord = parse_hotkey(config.hotkey)
         self.recorder = recorder or Recorder(config.sample_rate, config.channels)
-        self.client = client or OpenRouterClient(
-            api_key=config.api_key,
-            model=config.model,
-            language=config.language,
-            timeout=config.request_timeout,
-        )
+        # A client is bound to one model and language, so a settings change
+        # builds a new one rather than mutating this one (DESIGN 2). The
+        # factory is the seam that lets apply() do that with a fake, too.
+        self._new_client = client_factory or _openrouter
+        self.client = client or self._new_client(config)
         self.paster = paster or Paster(config.paste_settle)
         self.sound = sound or Player(config.sound_volume)
         self.history = history
@@ -83,6 +92,31 @@ class Talkie:
             self._on_record(entry)
         except Exception:
             log.exception("record observer failed")
+
+    # -- settings ----------------------------------------------------------
+
+    def apply(self, config: Config) -> None:
+        """Adopt changed settings without restarting the process.
+
+        Called from the UI's bridge thread while dictation may be in flight, so
+        it only rebinds attributes — a clip already being transcribed finishes
+        against the client it started with, which is what you want: its history
+        row should name the model that actually did the work.
+
+        The hotkey is not read here. Changing it means tearing down the pynput
+        listener, and nothing in the UI offers that yet.
+        """
+        self.config = config
+        self.client = self._new_client(config)
+        self.sound.volume = config.sound_volume
+        if self.history is not None:
+            self.history.keep = config.history_keep
+            self.history.prune()
+        log.info(
+            "settings applied · model %s · language %s",
+            config.model,
+            config.language or "auto",
+        )
 
     # -- lifecycle ---------------------------------------------------------
 

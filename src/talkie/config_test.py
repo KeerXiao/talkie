@@ -32,3 +32,14 @@ def test_environment_overrides():
 def test_blank_language_means_auto_detect():
     config = Config.from_env({"OPENROUTER_API_KEY": "sk-test", "TALKIE_LANGUAGE": ""})
     assert config.language is None
+
+
+def test_history_keep_defaults_and_overrides():
+    assert Config.from_env({"OPENROUTER_API_KEY": "sk-test"}).history_keep == 50
+    env = {"OPENROUTER_API_KEY": "sk-test", "TALKIE_HISTORY_KEEP": "10"}
+    assert Config.from_env(env).history_keep == 10
+
+
+def test_history_keep_must_be_a_number():
+    with pytest.raises(ConfigError):
+        Config.from_env({"OPENROUTER_API_KEY": "sk-test", "TALKIE_HISTORY_KEEP": "lots"})

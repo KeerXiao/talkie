@@ -2,6 +2,7 @@
 
 import threading
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -9,6 +10,7 @@ from talkie.app import Talkie
 from talkie.audio import Clip
 from talkie.client import ServerError, Transcript
 from talkie.config import Config
+from talkie.history import History
 
 
 class FakeRecorder:
@@ -334,3 +336,84 @@ def test_history_is_optional(tmp_path):
     assert app.history is None
     dictate(app)
     assert app.paster.pasted == ["hi"]
+
+
+# -- applying settings without a restart -----------------------------------
+
+
+def test_apply_rebuilds_the_client_for_the_new_model():
+    """A client is bound to one model, so a change means a new one (DESIGN 2)."""
+    built = []
+
+    def factory(config):
+        built.append((config.model, config.language))
+        return FakeClient()
+
+    app = Talkie(
+        Config(api_key="sk-test", model="first", language="en"),
+        recorder=FakeRecorder(),
+        paster=FakePaster(),
+        sound=FakePlayer(),
+        client_factory=factory,
+    )
+    assert built == [("first", "en")]
+
+    app.apply(replace(app.config, model="second", language=None))
+
+    assert built == [("first", "en"), ("second", None)]
+    assert app.config.model == "second"
+
+
+def test_apply_retunes_the_cues_and_the_history_cap(tmp_path):
+    history = History(root=tmp_path, keep=50)
+    app = Talkie(
+        Config(api_key="sk-test"),
+        recorder=FakeRecorder(),
+        client=FakeClient(),
+        paster=FakePaster(),
+        sound=FakePlayer(),
+        history=history,
+    )
+
+    app.apply(replace(app.config, sound_volume=0.0, history_keep=5))
+
+    assert app.sound.volume == 0.0
+    assert history.keep == 5
+
+
+def test_lowering_retention_prunes_immediately(tmp_path):
+    history = History(root=tmp_path, keep=50)
+    for _ in range(6):
+        history.record(Clip(b"RIFF", 1.0), transcript=Transcript("x", "m", 0.1, {}))
+    app = Talkie(
+        Config(api_key="sk-test"),
+        recorder=FakeRecorder(),
+        client=FakeClient(),
+        paster=FakePaster(),
+        sound=FakePlayer(),
+        history=history,
+    )
+
+    app.apply(replace(app.config, history_keep=2))
+
+    assert len(history.list()) == 2
+
+
+def test_the_next_dictation_uses_the_new_client(sound):
+    """The point of applying live: no restart between changing it and using it."""
+    first, second = FakeClient(text="old"), FakeClient(text="new")
+    clients = iter([first, second])
+    paster = FakePaster()
+    app = Talkie(
+        Config(api_key="sk-test"),
+        recorder=FakeRecorder(),
+        paster=paster,
+        sound=sound,
+        client_factory=lambda _: next(clients),
+    )
+
+    dictate(app)
+    app.apply(replace(app.config, language="zh"))
+    dictate(app)
+
+    assert paster.pasted == ["old", "new"]

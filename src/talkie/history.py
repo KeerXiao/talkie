@@ -17,11 +17,14 @@ from pathlib import Path
 
 from talkie.audio import Clip
 from talkie.client import Transcript
+from talkie.config import DEFAULT_HISTORY_KEEP
 
 log = logging.getLogger(__name__)
 
 DEFAULT_ROOT = Path.home() / ".talkie" / "history"
-DEFAULT_KEEP = 50
+# The settings page changes this at runtime; config.py owns the number so
+# there is only one 50 to keep in step.
+DEFAULT_KEEP = DEFAULT_HISTORY_KEEP
 STAMP = "%Y%m%dT%H%M%SZ"
 # Ids are generated, but they also arrive from the UI; never trust them as paths.
 ID_RE = re.compile(r"^\d{8}T\d{6}Z(-\d+)?$")

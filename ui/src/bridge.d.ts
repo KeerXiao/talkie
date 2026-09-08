@@ -43,6 +43,60 @@ export interface Stats {
   failures: number
 }
 
+/**
+ * The fields the settings page may change — the TypeScript view of
+ * `talkie.settings.Settings`.
+ *
+ * snake_case, unlike Interaction, and deliberately: settings cross the bridge
+ * and land in ~/.talkie/settings.json unreshaped, so one naming convention
+ * serves the wire and the file. Interaction is camelCase because this side
+ * reformats every field of it anyway.
+ */
+export interface Settings {
+  /** A language code, or the literal 'auto' to let the model detect it. */
+  language: string
+  /** An OpenRouter model id. */
+  model: string
+  /** Multiplies system output volume. 0 silences the cues. */
+  sound_volume: number
+  /** How many interactions history keeps before pruning the oldest. */
+  history_keep: number
+}
+
+/** One entry in the language dropdown. */
+export interface Language {
+  code: string
+  label: string
+}
+
+/** Everything the settings page needs to draw itself, in one call. */
+export interface SettingsForm {
+  settings: Settings
+  /** Offered in the dropdown; an unlisted code still round-trips. */
+  languages: Language[]
+  /** Suggestions for the model field, which stays free text. */
+  models: string[]
+  limits: { maxVolume: number; maxKeep: number }
+}
+
+/**
+ * The outcome of one save. Never a rejected Promise: a thrown Python exception
+ * arrives here opaque, with no field to point the message at.
+ */
+export type SettingsResult =
+  | {
+      ok: true
+      /** False when the change applied but could not be written to disk. */
+      persisted: boolean
+      settings: Settings
+    }
+  | {
+      ok: false
+      /** Which field was rejected; empty when the whole patch was unreadable. */
+      field: string
+      error: string
+    }
+
 /** Everything the window may ask of Python. */
 export interface TalkieApi {
   /**
@@ -67,6 +121,13 @@ export interface TalkieApi {
   delete(clip_id: string): Promise<boolean>
   /** Remove every interaction. Returns how many were deleted. */
   clear(): Promise<number>
+  /** Current settings plus the choices the form renders. */
+  get_settings(): Promise<SettingsForm>
+  /**
+   * Validate, persist and apply a partial change; absent keys keep their value.
+   * Takes effect on the running app immediately — no restart.
+   */
+  update_settings(patch: Partial<Settings>): Promise<SettingsResult>
 }
 
 /**

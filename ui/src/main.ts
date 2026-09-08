@@ -1,18 +1,17 @@
 import './styles.css'
-import type { Interaction, TalkieApi } from './bridge'
+import type { Interaction } from './bridge'
+import { api, button, el, flash } from './dom'
 import { byDay, cost, duration, matches, time } from './format'
+import { settingsPanel } from './settings'
 
 const root = document.getElementById('app')!
+/** Which tab is showing. History is what the window is for; settings is a detour. */
+type View = 'history' | 'settings'
+let view: View = 'history'
 let entries: Interaction[] = []
 let query = ''
 let playing: string | null = null
 let playingUri: string | null = null
-
-function api(): TalkieApi {
-  const bridge = window.pywebview?.api
-  if (!bridge) throw new Error('bridge not ready')
-  return bridge
-}
 
 async function load(): Promise<void> {
   try {
@@ -20,36 +19,10 @@ async function load(): Promise<void> {
   } catch {
     entries = []
   }
-  render()
-}
-
-/** Transcripts are arbitrary user speech, so build nodes — never innerHTML. */
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  className?: string,
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag)
-  if (className) node.className = className
-  if (text !== undefined) node.textContent = text
-  return node
-}
-
-function button(label: string, title: string, onClick: () => void): HTMLButtonElement {
-  const b = el('button', 'action', label)
-  b.title = title
-  b.addEventListener('click', onClick)
-  return b
-}
-
-async function flash(target: HTMLElement, label: string): Promise<void> {
-  const original = target.textContent
-  target.textContent = label
-  target.classList.add('done')
-  setTimeout(() => {
-    target.textContent = original
-    target.classList.remove('done')
-  }, 1200)
+  // Only redraw if the list is what is on screen. A dictation landing while
+  // the settings tab is open would otherwise rebuild the form under the
+  // user's caret, halfway through a model id.
+  if (view === 'history') render()
 }
 
 async function play(entry: Interaction, trigger: HTMLButtonElement): Promise<void> {
@@ -63,7 +36,7 @@ async function play(entry: Interaction, trigger: HTMLButtonElement): Promise<voi
   try {
     const uri = await api().clip_audio(entry.id)
     if (!uri) {
-      await flash(trigger, 'gone')
+      flash(trigger, 'gone')
       return
     }
     // A real <audio controls> rather than a bare Audio(): the point of keeping
@@ -72,7 +45,7 @@ async function play(entry: Interaction, trigger: HTMLButtonElement): Promise<voi
     playingUri = uri
     render()
   } catch {
-    await flash(trigger, 'failed')
+    flash(trigger, 'failed')
   } finally {
     trigger.disabled = false
   }
@@ -111,7 +84,7 @@ function row(entry: Interaction): HTMLElement {
   const actions = el('div', 'actions')
   if (entry.ok && entry.text) {
     const copy = button('Copy', 'Copy this transcript', async () => {
-      if (await api().copy(entry.id)) await flash(copy, 'Copied')
+      if (await api().copy(entry.id)) flash(copy, 'Copied')
     })
     actions.append(copy)
   }
@@ -131,9 +104,28 @@ function row(entry: Interaction): HTMLElement {
   return item
 }
 
+function tab(label: string, target: View): HTMLButtonElement {
+  const b = el('button', view === target ? 'tab on' : 'tab', label)
+  b.setAttribute('aria-current', String(view === target))
+  b.addEventListener('click', () => {
+    if (view === target) return
+    view = target
+    render()
+    // Dictations that landed while this tab was hidden were fetched but not
+    // drawn; pick them up now.
+    if (target === 'history') void load()
+  })
+  return b
+}
+
 function header(): HTMLElement {
   const bar = el('header')
-  bar.append(el('h1', undefined, 'History'))
+  const tabs = el('nav', 'tabs')
+  tabs.append(tab('History', 'history'), tab('Settings', 'settings'))
+  bar.append(tabs)
+
+  // The search box and Clear all only mean anything over a list of clips.
+  if (view !== 'history') return bar
 
   const search = el('input', 'search')
   search.type = 'search'
@@ -174,9 +166,13 @@ function empty(): HTMLElement {
 }
 
 function render(): void {
-  const visible = entries.filter((e) => matches(e, query))
   root.replaceChildren(header())
+  if (view === 'settings') {
+    root.append(settingsPanel())
+    return
+  }
 
+  const visible = entries.filter((e) => matches(e, query))
   if (!visible.length) {
     root.append(empty())
     return

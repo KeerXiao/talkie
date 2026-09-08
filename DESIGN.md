@@ -19,6 +19,7 @@ Each module owns one concern and depends only on the ones below it, so a backend
 | Module | Responsibility | Key types |
 |---|---|---|
 | `config.py` | Resolve env vars once at startup; fail fast on a missing key | `Config`, `ConfigError` |
+| `settings.py` | The slice of `Config` the UI may change; validate, persist, layer over the environment | `Settings`, `SettingsStore`, `SettingsError` |
 | `audio.py` | Mic capture → in-memory 16 kHz mono WAV | `Recorder`, `Clip` |
 | `hotkey.py` | Chord parsing, macOS key normalisation, engage/disengage edges | `Chord`, `ChordListener` |
 | `client/` | Backend layer: HTTP, auth, error mapping, retries | `TranscriptionClient`, `OpenRouterClient`, `Transcript`, `ClientError` |
@@ -184,9 +185,11 @@ It has exactly two directions:
 | `list_history()` | `Interaction[]` | newest first, no audio |
 | `clip_audio(clip_id)` | `str \| None` | `data:audio/wav;base64,…` |
 | `stats()` | `Stats` | today's totals, local midnight |
+| `get_settings()` | `SettingsForm` | current values *and* the choices to render |
 | `copy(clip_id)` | `bool` | mutates the clipboard |
 | `delete(clip_id)` | `bool` | mutates |
 | `clear()` | `int` | mutates |
+| `update_settings(patch)` | `SettingsResult` | mutates; validates, persists, applies |
 
 One event goes the other way: `onHistoryChanged()`, no payload — the UI re-reads through `list_history`, which keeps one path for loading history instead of two.
 
@@ -231,7 +234,43 @@ Three rules keep the directory readable by a future build and by a human:
 Pruning to the 50 most recent runs after each new write and once at startup.
 A write error is logged and swallowed; `record()` never raises into the dictation path.
 
-## 7. Threading and shutdown
+## 7. Settings
+
+`Config` is frozen and resolved once, which is right for a process that never changes its mind — and wrong the moment a user can change the language from a window.
+`settings.py` is the reconciliation: a second, smaller value type naming exactly the fields the UI may touch, with `Config` still the single thing every component is handed.
+
+```
+Config.from_env()  ->  Settings.from_config()  ->  store.load()  ->  settings.apply_to(config)
+   the environment        the editable slice        the saved file      what everything is built from
+```
+
+`resolve()` is that whole pipeline, and both builds call it from `cli.py`, so `talkie` and `talkie --ui` cannot drift apart about what is configured.
+
+**The file wins over the environment.**
+The UI is the user's most recent explicit choice; a shell export made months ago should not silently undo a dropdown touched a second ago.
+The environment still seeds a first run, which is what keeps `TALKIE_MODEL=… talkie` useful for a one-off.
+
+**The API key is not a setting.**
+It never enters `Settings`, so it can never be written to `settings.json` — and because `merge` ignores keys it does not know, a patch arriving from JavaScript cannot introduce one either.
+
+**Validation lives with the type, not the page.**
+`Settings.merge` coerces and bounds every field and raises `SettingsError` carrying the offending field name; the page renders the message beside that control.
+`Api.update_settings` catches it and returns a result instead, because an exception crossing the pywebview bridge arrives in JavaScript opaque, with nothing to point at.
+
+**Reading is tolerant; writing is strict.**
+A hand-edited file with one bad value loses that value and keeps the rest (`tolerant_merge`), and an unparseable file falls back to the environment rather than refusing to start.
+A save is atomic, the same temp-and-`os.replace` as history, and reports failure rather than raising: the change has already applied to the running process, and the page says it will not survive a restart rather than pretending otherwise.
+
+**Applying is live, and one-directional.**
+`Talkie.apply(config)` rebinds the client, the cue volume and the history cap.
+The client is rebuilt rather than mutated, because a client is bound to one model and language (§2) — `client_factory` is the seam that lets a test observe it.
+It runs on the bridge thread while a dictation may be in flight, which is safe only because it does nothing but rebind: a clip already inside `transcribe()` finishes against the client it started with, so its history row names the model that actually did the work.
+
+**The hotkey is not there.**
+Every other setting is a value read at the moment it is used; the hotkey is held by a running pynput listener, so changing it means stopping that listener and starting another, and getting the engaged/pressed state right across the swap.
+That is more machinery than the rest of the page combined, so it stays on `TALKIE_HOTKEY` until it is asked for.
+
+## 8. Threading and shutdown
 
 Three threads, and only one of them may touch AppKit.
 
@@ -276,7 +315,7 @@ Cancelling and destroying the window ourselves returns `webview.start()` and end
 `pywebview` already sets `NSApplicationActivationPolicyRegular` during `start()`, which is what we want; it is set again alongside the delegate so nothing depends on that staying true.
 The app calls `activateIgnoringOtherApps_` when reopening the window, since a background app does not come forward on its own.
 
-## 8. Name and icon
+## 9. Name and icon
 
 Run from a bare interpreter, macOS calls us `python3` and shows the generic Python icon, because both normally come from an `.app` bundle's `Info.plist` and there is no bundle.
 Only one of the three places this shows was fixable at runtime:
@@ -291,13 +330,13 @@ The icon case is worth recording precisely, because it looks like it works from 
 `applicationIconImage()` reads back the image we set, and no error is raised — but the dock is unchanged.
 An in-process read only echoes the setter, so it is not evidence; the check that mattered was looking at the dock.
 
-Both remaining surfaces therefore need the real bundle in §9.
+Both remaining surfaces therefore need the real bundle in §10.
 `ui/branding.py` is kept regardless: it draws the artwork in code, which is what will generate the bundle's `.icns`, so the icon exists and is tested — it just has nowhere to be displayed yet.
 
-## 9. Packaging
+## 10. Packaging
 
 - **Builder: `py2app`**. `LSUIElement` stays unset — talkie is a regular app and wants its dock icon.
-- **`CFBundleName` and an `.icns`** move into `Info.plist`. Per §8 this is the only way to get talkie's own icon and name in the dock at all.
+- **`CFBundleName` and an `.icns`** move into `Info.plist`. Per §9 this is the only way to get talkie's own icon and name in the dock at all.
 The `.icns` is generated from `ui/branding.py`, so there is no second copy of the artwork to keep in sync.
 - **`NSMicrophoneUsageDescription` is mandatory** in `Info.plist`; without it the app dies on first microphone access.
 - The built TS bundle ships as bundle data, so the frontend build is a step in the app build, not a runtime dependency.
@@ -308,13 +347,13 @@ That buys the identity, the icon, and talkie's own TCC entries without a freezer
 
 Signing tiers are a requirement, not a design choice — see SPEC §5.4.
 
-## 10. Open technical questions
+## 11. Open technical questions
 
 - Whether the `js_api` relaunch-per-edit loop becomes annoying enough to justify the loopback HTTP server in §5.
 - ~~Whether `rumps` and `pywebview` can share a process~~ — **answered by spike, §4.** They cannot, but `rumps` is the replaceable half. Polling and FSEvents are both moot: the window is pushed to directly.
 - Whether the four-state push to the menu bar should be widened into an `onState` event for the window (§5).
 
-## 11. References
+## 12. References
 
 - pywebview (native WebView windows for Python) — https://pywebview.flowrl.com/
 - rumps (macOS menu-bar apps in Python) — https://github.com/jaredks/rumps

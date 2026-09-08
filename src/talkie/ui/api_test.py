@@ -10,6 +10,7 @@ import pytest
 from talkie.audio import Clip
 from talkie.client import Transcript
 from talkie.history import History
+from talkie.settings import MAX_KEEP, Settings, SettingsStore
 from talkie.ui.api import Api
 
 
@@ -158,3 +159,105 @@ def test_api_does_not_import_pywebview():
 
     assert "webview" not in imported
     assert "pywebview" not in imported
+
+
+# -- settings --------------------------------------------------------------
+
+
+@pytest.fixture
+def settings_api(tmp_path):
+    """Api wired to a throwaway settings file, recording what it applies."""
+    applied = []
+    api = Api(
+        History(root=tmp_path / "h"),
+        clipboard=FakeClipboard(),
+        settings=Settings(language="en", model="m", sound_volume=1.0, history_keep=50),
+        store=SettingsStore(tmp_path / "settings.json"),
+        on_settings_changed=applied.append,
+    )
+    api.applied = applied
+    return api
+
+
+def test_get_settings_carries_the_choices_the_form_needs(settings_api):
+    form = settings_api.get_settings()
+    assert form["settings"]["language"] == "en"
+    assert {"code": "zh", "label": "Chinese"} in form["languages"]
+    assert form["languages"][0]["code"] == "auto"
+    assert form["models"] and form["limits"]["maxKeep"] == MAX_KEEP
+
+
+def test_get_settings_never_leaks_the_key(settings_api):
+    assert "api_key" not in settings_api.get_settings()["settings"]
+
+
+def test_update_persists_and_applies(settings_api):
+    result = settings_api.update_settings({"language": "zh"})
+
+    assert result == {
+        "ok": True,
+        "persisted": True,
+        "settings": {
+            "language": "zh",
+            "model": "m",
+            "sound_volume": 1.0,
+            "history_keep": 50,
+        },
+    }
+    assert settings_api.settings.language == "zh"
+    assert [s.language for s in settings_api.applied] == ["zh"]
+    # Reloading the store must see it, or the change dies with the process.
+    assert settings_api.store.load(Settings()).language == "zh"
+
+
+def test_a_rejected_field_changes_nothing(settings_api):
+    result = settings_api.update_settings({"language": "not a code"})
+
+    assert result["ok"] is False and result["field"] == "language"
+    assert settings_api.settings.language == "en"
+    assert settings_api.applied == []
+    assert not settings_api.store.path.exists()
+
+
+@pytest.mark.parametrize("junk", ["a string", 42, None, ["language", "zh"]])
+def test_a_junk_patch_is_reported_not_raised(settings_api, junk):
+    """Everything here arrives from JavaScript; nothing may escape as a throw."""
+    result = settings_api.update_settings(junk)
+    assert result["ok"] is False
+    assert settings_api.applied == []
+
+
+def test_auto_detect_round_trips(settings_api):
+    assert settings_api.update_settings({"language": "auto"})["ok"] is True
+    assert settings_api.settings.language is None
+    assert settings_api.get_settings()["settings"]["language"] == "auto"
+    assert settings_api.applied[-1].language is None
+
+
+def test_a_broken_observer_does_not_lose_the_save(tmp_path):
+    """The settings are already written; a failure to apply must not undo that."""
+
+    def explode(_):
+        raise RuntimeError("menu bar is gone")
+
+    api = Api(
+        History(root=tmp_path / "h"),
+        clipboard=FakeClipboard(),
+        store=SettingsStore(tmp_path / "settings.json"),
+        on_settings_changed=explode,
+    )
+    assert api.update_settings({"model": "other"})["ok"] is True
+    assert api.settings.model == "other"
+
+
+def test_an_unwritable_store_still_applies(tmp_path):
+    blocked = tmp_path / "afile"
+    blocked.write_text("not a directory")
+    api = Api(
+        History(root=tmp_path / "h"),
+        clipboard=FakeClipboard(),
+        store=SettingsStore(blocked / "settings.json"),
+    )
+    result = api.update_settings({"model": "other"})
+    assert result["ok"] is True and result["persisted"] is False
+    assert api.settings.model == "other"

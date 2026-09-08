@@ -67,7 +67,7 @@ M2 observes M1's recording and transcription path; it does not change it.
 
 ### 4.3 Configuration
 
-Env vars only.
+Env vars, layered under the settings page (5.5) where the two overlap.
 
 | Var | Default | Purpose |
 |---|---|---|
@@ -76,6 +76,7 @@ Env vars only.
 | `TALKIE_HOTKEY` | `ctrl+q` | Push-to-talk chord |
 | `TALKIE_LANGUAGE` | `en` | Passed through as `language`; unset to let the model auto-detect |
 | `TALKIE_SOUND_VOLUME` | `1.0` | Multiplies system output volume; `0` off, `>1` amplifies |
+| `TALKIE_HISTORY_KEEP` | `50` | How many interactions history keeps |
 
 ### 4.4 Acceptance criteria
 
@@ -145,7 +146,32 @@ Signing tiers, in the order they are likely to be wanted:
 **M2 targets the self-signed tier.**
 Notarization is only worth it when the tool is handed to someone else.
 
-### 5.5 Acceptance criteria
+### 5.5 Settings
+
+A second tab in the window, alongside History, for the knobs a user actually
+reaches for twice.
+Everything else stays environment-only.
+
+| Setting | Shape | Notes |
+|---|---|---|
+| Language | Dropdown, including **Auto-detect** | Auto sends no `language` field at all |
+| Model | Free text, with the known-good ids suggested | OpenRouter's catalogue moves faster than a fixed list |
+| Sound cues | Slider, 0–3× | 0 turns the cues off |
+| Keep history | Number, 1–500 | Lowering it prunes immediately |
+
+Four rules:
+
+- **Saved to `~/.talkie/settings.json`,** and it wins over the environment — the UI is the more recent explicit choice.
+  The environment still seeds a first run, before the file exists.
+- **The API key is never written there.** It stays environment-only; a settings file that could leak a key is a liability the project does not want.
+- **A change applies to the running app,** so the next thing you dictate already uses it. No restart, and no Save button.
+- **Both builds read the same file,** so `talkie` and `talkie --ui` never disagree about what is configured.
+
+The hotkey is deliberately not here yet — changing it means tearing down the
+pynput listener, which is more machinery than the rest of the page put together.
+`TALKIE_HOTKEY` still sets it.
+
+### 5.6 Acceptance criteria
 
 1. Launching the app opens its window and puts an icon in the dock and the menu bar; no terminal window is needed.
 2. The icon changes to 🔴 while recording and ⏳ while transcribing, and back to 🎙 within one frame of finishing.
@@ -157,6 +183,9 @@ Notarization is only worth it when the tool is handed to someone else.
 8. Closing the history window leaves dictation working; reopening it works a second time.
 9. Quit from the menu stops the listener, closes the mic stream, and leaves no orphaned process.
 10. The signed `.app` holds its own entries under Microphone, Accessibility, and Input Monitoring, and those entries survive a rebuild and relaunch.
+11. Switching Language to Chinese and dictating immediately afterwards transcribes as Chinese, with no restart.
+12. That choice survives a quit and relaunch, and `talkie` in a terminal honours it too.
+13. Lowering Keep history to 10 with 40 clips stored leaves exactly 10 pairs on disk.
 
 ## 6. macOS permissions
 

@@ -1,7 +1,7 @@
 """Label logic. The AppKit shell around it is proven by running the app."""
 
 from talkie.app import ERROR, IDLE, RECORDING, TRANSCRIBING
-from talkie.ui.menubar import icon_for, stats_label, status_label
+from talkie.ui.menubar import icon_for, model_label, stats_label, status_label
 
 
 def test_every_state_has_its_own_icon():
@@ -46,3 +46,14 @@ def test_failures_are_surfaced():
 
 def test_a_missing_cost_does_not_explode():
     assert stats_label({"clips": 2, "seconds": 20, "cost": None})
+
+
+def test_model_label_shows_the_language_too():
+    assert model_label("microsoft/mai-transcribe-2", "zh") == (
+        "Model: microsoft/mai-transcribe-2 · zh"
+    )
+
+
+def test_model_label_names_auto_detect():
+    """Auto-detect and a wrongly pinned language fail the same silent way."""
+    assert model_label("m", None) == "Model: m · auto"

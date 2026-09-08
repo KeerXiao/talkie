@@ -87,8 +87,28 @@ The window lists every past dictation, newest first, grouped by day.
 Each row can be copied, replayed, or deleted, and there's a search box over the transcripts.
 **Failed clips are kept too**, with the error in place of the transcript and their audio still playable — so when something goes wrong you can hear exactly what the model was sent.
 
-History lives in `~/.talkie/history/` as a `.wav` and `.json` pair per dictation, capped at the 50 most recent.
+History lives in `~/.talkie/history/` as a `.wav` and `.json` pair per dictation, capped at the 50 most recent by default.
 Nothing is uploaded anywhere except the transcription request itself.
+
+### Settings
+
+The window's second tab holds the four knobs worth reaching for twice:
+
+| | |
+|---|---|
+| **Language** | English, Chinese, and the rest — or **Auto-detect**, which sends no hint at all and lets the model work it out. Pinning it stops a short clip being guessed wrong; auto handles switching mid-session. |
+| **Model** | Any OpenRouter transcription model ID, with the known-good ones suggested. |
+| **Sound cues** | The start/stop/error beeps, 0–3×. `0` turns them off. |
+| **Keep history** | 1–500 clips. Lowering it deletes the excess right away. |
+
+There's no Save button: every change is written and applied as you make it, so the next thing you dictate already uses it.
+No restart, and no waiting.
+
+Your choices go in `~/.talkie/settings.json`, and they **override the environment variables below** — the settings page is the more recent, more deliberate choice, so it wins.
+The environment still decides a first run, before that file exists.
+Your API key is never written there; it stays an environment variable.
+
+Changing the hotkey isn't in the UI yet — it means restarting the key listener underneath, which is a bigger job than the rest of the page. `TALKIE_HOTKEY` still does it.
 
 ## The three macOS permissions
 
@@ -131,8 +151,6 @@ Failures beep and log — error text is never pasted into your document.
 
 ## Configuration
 
-Environment variables only.
-
 | Variable | Default | Purpose |
 |---|---|---|
 | `OPENROUTER_API_KEY` | *(required)* | Your OpenRouter key |
@@ -140,6 +158,11 @@ Environment variables only.
 | `TALKIE_HOTKEY` | `ctrl+q` | Push-to-talk chord, e.g. `ctrl+alt+d`, `f5` |
 | `TALKIE_LANGUAGE` | `en` | Sent as the `language` hint; set empty to let the model auto-detect |
 | `TALKIE_SOUND_VOLUME` | `1.0` | Cue volume. `0` turns the sounds off; `>1` amplifies |
+| `TALKIE_HISTORY_KEEP` | `50` | How many past dictations to keep |
+
+Model, language, sound volume and retention can also be set from the [settings page](#settings), and what you set there wins — check that tab first if a variable seems to be ignored.
+The key and the hotkey are environment-only.
+Both `make run` and `make ui` read the same saved settings, so they never disagree.
 
 `TALKIE_SOUND_VOLUME` *multiplies* your system output volume rather than replacing it, so it can't make a muted Mac audible — turn the Mac up first.
 
@@ -151,7 +174,7 @@ Environment variables only.
 | `openai/gpt-transcribe` | 3.3% | $0.0045/min | Worth A/B-ing on your own voice |
 | `openai/whisper-large-v3-turbo` | ~12% | $3e-6/sec | Cheap smoke test, not for daily use |
 
-Switching is just `export TALKIE_MODEL=...` — same code path, same request shape.
+Switching is the Model field in the settings tab, or `export TALKIE_MODEL=...` — same code path, same request shape either way.
 
 ## Development
 
@@ -189,7 +212,7 @@ Everything is injected rather than imported at the point of use, so the whole fl
 - **macOS only.** The hotkey, paste and cue layers all assume it.
 - **No maximum recording length.** If a key-release event is ever missed, talkie keeps recording. Bounded in M2.
 - **Push-to-talk only** — no toggle mode, no streaming, no partial results.
-- **Not a bundled `.app` yet.** It runs from a terminal, so macOS attributes permissions to your terminal rather than to talkie. [DESIGN.md](DESIGN.md) §9 has the packaging plan.
+- **Not a bundled `.app` yet.** It runs from a terminal, so macOS attributes permissions to your terminal rather than to talkie. [DESIGN.md](DESIGN.md) §10 has the packaging plan.
 - **Your audio leaves your machine.** That's the entire premise. If that's not acceptable, use a local tool.
 
 ## Spec and design
