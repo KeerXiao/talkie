@@ -18,9 +18,11 @@ class FakeRecorder:
         self.duration = duration
         self.active = False
         self.events = []
+        self.on_frame = None
 
-    def start(self):
+    def start(self, on_frame=None):
         self.active = True
+        self.on_frame = on_frame
         self.events.append("start")
 
     def stop(self):
@@ -211,9 +213,9 @@ def test_start_cue_fires_before_the_mic_opens(sound):
     order = []
 
     class OrderedRecorder(FakeRecorder):
-        def start(self):
+        def start(self, on_frame=None):
             order.append("mic")
-            super().start()
+            super().start(on_frame)
 
     class OrderedPlayer(FakePlayer):
         def start(self):
@@ -417,3 +419,141 @@ def test_the_next_dictation_uses_the_new_client(sound):
     dictate(app)
 
     assert paster.pasted == ["old", "new"]
+
+
+# -- streaming (M3) --------------------------------------------------------
+
+
+class FakeSession:
+    def __init__(self, text="live text", error=None, partials=()):
+        self.text = text
+        self.error = error
+        self.partials = partials
+        self.fed = []
+        self.finished = False
+        self.cancelled = False
+        self._on_partial = None
+
+    def feed(self, block):
+        self.fed.append(block)
+
+    def finish(self):
+        self.finished = True
+        for partial in self.partials:
+            self._on_partial(partial)
+        if self.error is not None:
+            raise self.error
+        return Transcript(text=self.text, model="live", latency=0.2,
+                          usage={"cost": 0.017})
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class FakeStreamClient:
+    def __init__(self, session=None, error=None):
+        self.session = session or FakeSession()
+        self.error = error
+        self.opened = 0
+
+    def open(self, on_partial=None):
+        self.opened += 1
+        if self.error is not None:
+            raise self.error
+        self.session._on_partial = on_partial
+        return self.session
+
+
+def build_streaming(session=None, stream_error=None, client=None, **kwargs):
+    """A Talkie whose config streams, with both factories faked."""
+    config = Config(api_key="sk", provider="openai", model="gpt-live-transcribe")
+    assert config.streaming
+    stream = FakeStreamClient(session=session, error=stream_error)
+    app = Talkie(
+        config,
+        recorder=FakeRecorder(),
+        paster=FakePaster(),
+        sound=FakePlayer(),
+        client_factory=lambda cfg: client or FakeClient(),
+        stream_factory=lambda cfg: stream,
+        **kwargs,
+    )
+    return app, stream
+
+
+def test_a_streamed_dictation_pastes_what_the_session_heard():
+    app, stream = build_streaming()
+    paster = app.paster
+
+    dictate(app)
+
+    assert stream.opened == 1
+    assert stream.session.finished is True
+    assert paster.pasted == ["live text"]
+
+
+def test_the_mic_feeds_the_session_while_recording():
+    app, stream = build_streaming()
+    dictate(app)
+    # The recorder is handed the session's own feed(), not a copy of the clip.
+    assert app.recorder.on_frame == stream.session.feed
+
+
+def test_partials_reach_the_observer_as_they_arrive():
+    seen = []
+    app, _ = build_streaming(
+        session=FakeSession(partials=["live", "live text"]), on_partial=seen.append
+    )
+    dictate(app)
+    assert seen == ["live", "live text"]
+
+
+def test_a_streaming_run_builds_no_one_shot_client():
+    """Holding both would make a cross-mode fallback possible."""
+    app, _ = build_streaming()
+    assert app.client is None
+    assert app.stream_client is not None
+
+
+def test_a_session_that_fails_is_a_failed_clip_not_a_retry(sound):
+    app, stream = build_streaming(session=FakeSession(error=ServerError("gone", 503)))
+    app.sound = sound
+    dictate(app)
+
+    assert app.paster.pasted == []
+    assert sound.cues[-1] == "error"
+
+
+def test_a_session_that_never_opens_fails_the_clip_too(sound):
+    """Without this the clip would silently fall through to the file endpoint —
+    a second request, a second bill, and the mode the user did not choose."""
+    app, stream = build_streaming(stream_error=RuntimeError("no socket"))
+    app.sound = sound
+    dictate(app)
+
+    assert app.paster.pasted == []
+    assert sound.cues[-1] == "error"
+
+
+def test_a_discarded_tap_cancels_the_session():
+    """Otherwise the socket and its two threads outlive every accidental tap."""
+    app, stream = build_streaming()
+    app.recorder = FakeRecorder(duration=0.1)
+    dictate(app)
+
+    assert stream.session.cancelled is True
+    assert stream.session.finished is False
+
+
+def test_closing_mid_dictation_cancels_the_session():
+    app, stream = build_streaming()
+    app._session = stream.session
+    app.close()
+    assert stream.session.cancelled is True
+
+
+def test_a_one_shot_run_opens_no_session():
+    app = build()
+    assert app.stream_client is None
+    dictate(app)
+    assert app.recorder.on_frame is None

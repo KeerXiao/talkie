@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
+
+import numpy as np
 
 from talkie.audio import Clip
 
@@ -49,6 +52,42 @@ class TranscriptionClient(Protocol):
 
     def transcribe(self, clip: Clip) -> Transcript:
         """Return the transcript, or raise a ClientError."""
+        ...
+
+    def check(self) -> KeyInfo:
+        """Confirm the credential works, or raise a ClientError."""
+        ...
+
+
+@runtime_checkable
+class StreamingSession(Protocol):
+    """One dictation's worth of live transcription.
+
+    Opened on press and closed on release — never reused, and never the same
+    session as a one-shot request for the same clip (SPEC §6.4).
+    """
+
+    def feed(self, block: np.ndarray) -> None:
+        """Hand over a block of mic audio. Called from the audio thread, so
+        this must not block and must not raise."""
+        ...
+
+    def finish(self) -> Transcript:
+        """Close the input, wait for the final text, or raise a ClientError."""
+        ...
+
+    def cancel(self) -> None:
+        """Abandon the session. Never raises; there is nothing left to save."""
+        ...
+
+
+@runtime_checkable
+class StreamingClient(Protocol):
+    """A backend that can transcribe while the audio is still arriving."""
+
+    def open(self, on_partial: Callable[[str], None] | None = None) -> StreamingSession:
+        """Start a session. Returns before the socket is up, so the mic can
+        open into the connect rather than after it."""
         ...
 
     def check(self) -> KeyInfo:

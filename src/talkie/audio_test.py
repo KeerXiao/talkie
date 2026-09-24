@@ -35,3 +35,38 @@ def test_frames_are_dropped_after_stop():
     recorder._on_audio(np.zeros((160, 1), dtype=np.int16), 160, None, None)
     recorder.stop()
     assert recorder.stop() == Clip(b"", 0.0)
+
+
+def test_the_tap_sees_every_block_and_the_clip_is_unaffected():
+    recorder = Recorder()
+    seen = []
+    recorder._on_frame = seen.append
+    for _ in range(3):
+        recorder._on_audio(np.zeros((1600, 1), dtype=np.int16), 1600, None, None)
+
+    assert len(seen) == 3
+    assert recorder.stop().duration == 0.3
+
+
+def test_a_broken_tap_costs_the_live_transcript_not_the_recording():
+    """It runs on PortAudio's callback thread — raising there ends the stream."""
+    recorder = Recorder()
+    calls = []
+
+    def explode(block):
+        calls.append(block)
+        raise RuntimeError("the socket went away")
+
+    recorder._on_frame = explode
+    recorder._on_audio(np.zeros((1600, 1), dtype=np.int16), 1600, None, None)
+    recorder._on_audio(np.zeros((1600, 1), dtype=np.int16), 1600, None, None)
+
+    assert len(calls) == 1  # unbound after the first failure
+    assert recorder.stop().duration == 0.2  # both blocks still recorded
+
+
+def test_the_tap_does_not_survive_the_recording_that_installed_it():
+    recorder = Recorder()
+    recorder._on_frame = lambda block: None
+    recorder.stop()
+    assert recorder._on_frame is None

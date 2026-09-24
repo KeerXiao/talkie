@@ -8,8 +8,9 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 from talkie.audio import Clip, Recorder
-from talkie.client import ClientError, TranscriptionClient
-from talkie.client.factory import for_config
+from talkie.client import ClientError, StreamingClient, TranscriptionClient
+from talkie.client.base import StreamingSession, Transcript
+from talkie.client.factory import for_config, streaming_for_config
 from talkie.config import Config
 from talkie.history import History, Interaction
 from talkie.hotkey import ChordListener, parse_hotkey
@@ -46,7 +47,9 @@ class Talkie:
         history: History | None = None,
         on_state: Callable[[str], None] | None = None,
         on_record: Callable[[Interaction], None] | None = None,
+        on_partial: Callable[[str], None] | None = None,
         client_factory: Callable[[Config], TranscriptionClient] | None = None,
+        stream_factory: Callable[[Config], StreamingClient] | None = None,
     ) -> None:
         self.config = config
         self.chord = parse_hotkey(config.hotkey)
@@ -55,20 +58,28 @@ class Talkie:
         # builds a new one rather than mutating this one (DESIGN 2). The
         # factory is the seam that lets apply() do that with a fake, too.
         self._new_client = client_factory or for_config
-        self.client = client or self._new_client(config)
+        self._new_stream = stream_factory or streaming_for_config
+        # Exactly one of these, chosen by the running mode. Holding both would
+        # make a cross-mode fallback possible, and there is deliberately no
+        # such thing (SPEC §6.4).
+        self.stream_client = self._new_stream(config) if config.streaming else None
+        self.client = client or (None if config.streaming else self._new_client(config))
         self.paster = paster or Paster(config.paste_settle)
         self.sound = sound or Player(config.sound_volume)
         self.history = history
         self.listener = ChordListener(self.chord, self._on_engage, self._on_disengage)
 
-        # Observers are optional: the terminal build sets neither.
+        # Observers are optional: the terminal build sets none of them.
         self._on_state = on_state
         self._on_record = on_record
+        self._on_partial = on_partial
 
         self._lock = threading.Lock()
         self._recording = False
         self._busy = False  # a transcription is in flight
         self._started_at: datetime | None = None
+        self._session: StreamingSession | None = None
+        self._streamed = False  # how the clip now being held will be sent
 
     def _emit(self, state: str) -> None:
         """Tell the UI, if there is one. A broken observer must not stop dictation."""
@@ -78,6 +89,16 @@ class Talkie:
             self._on_state(state)
         except Exception:
             log.exception("state observer failed")
+
+    def _emit_partial(self, text: str) -> None:
+        """Live text, straight off the socket thread. PR 4 puts it on screen."""
+        log.debug("partial: %s", text)
+        if self._on_partial is None:
+            return
+        try:
+            self._on_partial(text)
+        except Exception:
+            log.exception("partial observer failed")
 
     def _emit_record(self, entry: Interaction | None) -> None:
         if entry is None or self._on_record is None:
@@ -99,16 +120,25 @@ class Talkie:
 
         The hotkey is not read here. Changing it means tearing down the pynput
         listener, and nothing in the UI offers that yet.
+
+        Both clients are built before anything is rebound, so a config the
+        factory rejects leaves the app running exactly as it was rather than
+        half-applied.
         """
+        stream = self._new_stream(config) if config.streaming else None
+        client = None if config.streaming else self._new_client(config)
         self.config = config
-        self.client = self._new_client(config)
+        self.client = client
+        self.stream_client = stream
         self.sound.volume = config.sound_volume
         if self.history is not None:
             self.history.keep = config.history_keep
             self.history.prune()
         log.info(
-            "settings applied · model %s · language %s",
+            "settings applied · %s %s · %s · language %s",
+            config.provider,
             config.model,
+            config.running_mode,
             config.language or "auto",
         )
 
@@ -116,9 +146,11 @@ class Talkie:
 
     def run(self) -> None:
         log.info(
-            "hotkey %s · model %s · language %s",
+            "hotkey %s · %s %s · %s · language %s",
             self.chord,
+            self.config.provider,
             self.config.model,
+            self.config.running_mode,
             self.config.language or "auto",
         )
         if not accessibility_trusted():
@@ -138,6 +170,9 @@ class Talkie:
         self.listener.stop()
         if self.recorder.active:
             self.recorder.stop()
+        session, self._session = self._session, None
+        if session is not None:
+            session.cancel()
         log.info("bye")
 
     # -- chord callbacks ---------------------------------------------------
@@ -152,7 +187,26 @@ class Talkie:
         self.sound.start()
         self._emit(RECORDING)
         log.info("recording…")
-        self.recorder.start()
+        # open() returns before the socket is up, so connecting overlaps the
+        # first moments of speech instead of delaying the mic.
+        self._streamed = self.stream_client is not None
+        self._session = self._open_session()
+        self.recorder.start(on_frame=self._session.feed if self._session else None)
+
+    def _open_session(self) -> StreamingSession | None:
+        """A live session for this hold, or None when this run is one-shot.
+
+        A session that cannot be opened leaves `_streamed` set and the session
+        None, which fails the clip. It is never a reason to send the same audio
+        the other way: the two modes are never combined (§6.4).
+        """
+        if self.stream_client is None:
+            return None
+        try:
+            return self.stream_client.open(on_partial=self._emit_partial)
+        except Exception:
+            log.exception("could not open a live session")
+            return None
 
     def _on_disengage(self) -> None:
         with self._lock:
@@ -163,21 +217,32 @@ class Talkie:
 
         clip = self.recorder.stop()
         self.sound.stop()
+        session, self._session = self._session, None
+        streamed, self._streamed = self._streamed, False
         if clip.duration < self.config.min_seconds:
             log.info("discarded %.2fs tap", clip.duration)
+            if session is not None:
+                session.cancel()
             with self._lock:
                 self._busy = False
             self._emit(IDLE)
             return
         self._emit(TRANSCRIBING)
-        threading.Thread(target=self._handle, args=(clip,), daemon=True).start()
+        threading.Thread(
+            target=self._handle, args=(clip, session, streamed), daemon=True
+        ).start()
 
     # -- worker ------------------------------------------------------------
 
-    def _handle(self, clip: Clip) -> None:
+    def _handle(
+        self,
+        clip: Clip,
+        session: StreamingSession | None = None,
+        streamed: bool = False,
+    ) -> None:
         started_at = self._started_at
         try:
-            transcript = self.client.transcribe(clip)
+            transcript = self._transcribe(clip, session, streamed)
             if not transcript.text:
                 log.warning("empty transcript (%.1fs clip)", clip.duration)
                 self.sound.error()
@@ -206,8 +271,26 @@ class Talkie:
             self._save(clip, started_at, error="unexpected failure")
             self._emit(ERROR)
         finally:
+            if session is not None:
+                session.cancel()  # a no-op once finish() has returned
             with self._lock:
                 self._busy = False
+
+    def _transcribe(
+        self, clip: Clip, session: StreamingSession | None, streamed: bool
+    ) -> Transcript:
+        """The clip's one and only trip to a backend.
+
+        A live session that failed — even one that never opened — is a failed
+        clip. Retrying it as a one-shot request would double the bill, paste a
+        transcript the user watched fail, and is explicitly out of scope
+        (§6.4), so this raises rather than reaching for the other client.
+        """
+        if streamed:
+            if session is None:
+                raise ClientError("could not open a live session for this clip")
+            return session.finish()
+        return self.client.transcribe(clip)
 
     def _save(self, clip, started_at, transcript=None, error=None) -> None:
         """Persist the interaction, if this build keeps history."""

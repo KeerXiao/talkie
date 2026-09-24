@@ -1,6 +1,12 @@
 """Backend clients. `talkie.client.base` is the seam; the rest are impls."""
 
-from talkie.client.base import KeyInfo, TranscriptionClient, Transcript
+from talkie.client.base import (
+    KeyInfo,
+    StreamingClient,
+    StreamingSession,
+    Transcript,
+    TranscriptionClient,
+)
 from talkie.client.errors import (
     AuthError,
     ClientError,
@@ -10,7 +16,7 @@ from talkie.client.errors import (
     ResponseError,
     ServerError,
 )
-from talkie.client.openai import OpenAIClient
+from talkie.client.openai import OpenAIClient, OpenAIStreamingClient
 from talkie.client.openrouter import BASE_URL, OpenRouterClient
 
 __all__ = [
@@ -21,10 +27,13 @@ __all__ = [
     "KeyInfo",
     "NetworkError",
     "OpenAIClient",
+    "OpenAIStreamingClient",
     "OpenRouterClient",
     "RateLimitError",
     "ResponseError",
     "ServerError",
+    "StreamingClient",
+    "StreamingSession",
     "Transcript",
     "TranscriptionClient",
 ]
