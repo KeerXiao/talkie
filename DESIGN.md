@@ -1,6 +1,6 @@
 # talkie — Design
 
-**Design v0.1 · 2026-09-06**
+**Design v0.2 · 2026-09-23**
 
 How talkie is built.
 *What* it has to do, and why the project exists at all, is in [SPEC.md](SPEC.md); this document assumes those requirements and does not restate them.
@@ -18,17 +18,18 @@ Each module owns one concern and depends only on the ones below it, so a backend
 
 | Module | Responsibility | Key types |
 |---|---|---|
+| `providers.py` | The table: which clouds exist, what each model can be driven as, what a minute costs | `Provider`, `Model` |
 | `config.py` | Resolve env vars once at startup; fail fast on a missing key | `Config`, `ConfigError` |
 | `settings.py` | The slice of `Config` the UI may change; validate, persist, layer over the environment | `Settings`, `SettingsStore`, `SettingsError` |
 | `audio.py` | Mic capture → in-memory 16 kHz mono WAV | `Recorder`, `Clip` |
 | `hotkey.py` | Chord parsing, macOS key normalisation, engage/disengage edges | `Chord`, `ChordListener` |
-| `client/` | Backend layer: HTTP, auth, error mapping, retries | `TranscriptionClient`, `OpenRouterClient`, `Transcript`, `ClientError` |
+| `client/` | Backend layer: HTTP, sockets, auth, error mapping, retries | `TranscriptionClient`, `StreamingClient`, `OpenRouterClient`, `OpenAIClient`, `Transcript`, `ClientError` |
 | `paste.py` | Clipboard borrow → ⌘V → restore; failure beep | `Paster`, `beep()` |
 | `permissions.py` | Probe the macOS grants that fail silently | `accessibility_trusted()` |
 | `sound.py` | Non-blocking audible cues via `afplay` | `Player` |
 | `history.py` | Persist and prune past interactions | `History`, `Interaction` |
 | `app.py` | Wire the above into the push-to-talk loop; own the busy/recording state | `Talkie` |
-| `ui/` | Menu bar, history window, and the bridge to the frontend | see §5 |
+| `ui/` | Menu bar, history window, live overlay, and the bridge to the frontend | see §4.1, §5 |
 | `cli.py` | Argument parsing, logging setup, entry point | `main()` |
 
 Dependencies are injected into `Talkie`, so the state machine is tested against fake recorder/client/paster objects with no mic, network, or Accessibility grant.
@@ -37,7 +38,7 @@ The UI attaches to `app.py` alone.
 Tests sit beside the code they cover, Go style: `hotkey.py` and `hotkey_test.py` are neighbours.
 `pyproject.toml` excludes `**/*_test.py` from the wheel so they never ship.
 
-Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`, plus `pywebview` and PyObjC for the UI, and a `ui/` Vite + TypeScript project.
+Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`, `openai[realtime]`, plus `pywebview` and PyObjC for the UI, and a `ui/` Vite + TypeScript project.
 The frontend builds to a single self-contained `src/talkie/ui/web/index.html`, which is committed, so running talkie never requires Node.
 (`sounddevice` needs PortAudio.
 `pywebview` renders through the system WKWebView, so it embeds no browser engine.
@@ -53,6 +54,8 @@ The backend lives behind `talkie/client/`:
 | `client/base.py` | `TranscriptionClient` protocol and the `Transcript` value type — the seam another backend implements |
 | `client/errors.py` | `ClientError` and its subclasses, each carrying `.status` and `.retryable` |
 | `client/openrouter.py` | `OpenRouterClient`: request envelope, status→exception mapping, bounded retries |
+| `client/openai.py` | `OpenAIClient` (file endpoint) and `OpenAIStreamingClient` (realtime socket) |
+| `client/factory.py` | `for_config()` — the one place that turns provider + model + mode into an object |
 
 Nothing above `client/` imports `requests` or sees an HTTP status.
 `OpenRouterClient` accepts a `requests.Session` and a `base_url`, so the request shape and every failure path are asserted without a live call.
@@ -91,6 +94,66 @@ Each failure maps to a type: `AuthError` (401/403), `InsufficientCreditsError` (
 
 The client retries only what a second attempt can fix — rate limits, 5xx, transport failures — twice, with 0.5 s then 1 s backoff.
 A bad key or an empty account fails immediately rather than making the user wait.
+
+
+### 2.3 Providers and capability
+
+**Decision: capability is a property of the model, and it lives in one table.**
+
+`providers.py` holds every cloud, its key variable, and its models.
+Each model carries the modes it can be driven in — `stream`, `batch`, or both — and a per-minute price where the provider bills by duration.
+
+Four places need the same answers and must never disagree: `config.py` (which key, is this mode possible), `client/factory.py` (which object), the settings page (what to offer, what to grey out), and the history window (what did that cost).
+A table read by all four is the only arrangement where they cannot drift.
+
+Three rules fall out of it:
+
+- **An unlisted model id is assumed one-shot.**
+Both catalogues move faster than this file, so the model field stays free text.
+Guessing that an unknown id streams would fail at the worst moment — mid-dictation, with the mic already open — whereas guessing one-shot fails at the first request, cheaply and legibly.
+- **A one-mode model overrides the stored preference.**
+`Config.mode` is what the user asked for; `Config.running_mode` is what will happen.
+Refusing to dictate because `settings.json` remembers `stream` from a different model would help nobody.
+- **A price is only listed where the provider reports the duration back.**
+Then the number in the history window is arithmetic, not a guess about usage.
+Token-priced models carry `None` and show nothing, which is honest in a way that `$0.00` is not.
+
+`gpt-transcribe` and the 4o models also run inside a realtime session, but there they transcribe only after the turn is committed — which is exactly what one-shot does, over a socket instead of an HTTP request.
+They are listed as one-shot so nothing in the UI promises partials that never arrive.
+
+### 2.4 Streaming sessions
+
+**Decision: one WebSocket per hold of the hotkey, and the two modes never mix.**
+
+`StreamingClient.open()` returns a `StreamingSession` whose lifetime is exactly one dictation: `feed()` on every block of audio, `finish()` on release, `cancel()` if it is abandoned.
+
+```
+key down ──► Recorder ──┬──► frames ──► WAV ──────────────► history
+                        └──► on_frame ──► 24 kHz ──► append
+key up   ──► commit ──► deltas ──► overlay ──► completed ──► paste
+```
+
+- **One socket per clip, not one per app.**
+A dictation is seconds long, and an idle socket is a reconnect problem waiting to happen.
+`open()` returns before the socket is up and audio queues behind it, so connecting overlaps the first half-second of speech instead of delaying the mic.
+- **No fallback to the other mode.**
+A dead socket is a failed clip, with the same sound and the same history row as a failed request.
+Retrying through the file endpoint would mean two bills, two latencies, and a transcript from a different model than the partials the user just watched.
+- **Two threads per session.**
+The socket is full duplex, and a single thread blocked in `recv()` waiting for deltas would never get a turn to send audio.
+A pump thread drains the audio queue; a reader thread turns events into text.
+`feed()` runs on the sounddevice callback thread, so it only enqueues — no encoding, no network, no lock held.
+- **Resampling is a wire concern.**
+The realtime input format is 24 kHz PCM and nothing else; talkie records at 16 kHz.
+Blocks are resampled on the way out by linear interpolation, carrying the fractional read position and trailing sample across block boundaries so there is no discontinuity at the seams.
+The clip written to history stays untouched 16 kHz.
+Linear interpolation is crude, but the input is band-limited speech that the model downsamples again on arrival.
+- **Partials are cumulative, not deltas.**
+The session accumulates and hands the observer the whole transcript so far, so nothing above has to reassemble anything.
+Text is tracked per item id and joined in arrival order, because a long hold can be segmented into several items and joining two without a space would fuse the last word of one onto the first of the next.
+- **Turn detection is off.**
+Push-to-talk already knows where the turn ends.
+Server VAD would cut on a mid-sentence pause and commit audio the user had not finished speaking.
 
 ## 3. Recording, hotkey, and cues
 
@@ -167,6 +230,34 @@ The window is a scrolling list of text plus a play button, which HTML does in a 
 Search, virtual scrolling, and waveform rendering all stay cheap if they are ever wanted.
 The cost is one dependency, a hand-maintained type declaration at the bridge, and chrome that is styled rather than native.
 Alternatives rejected: Electron (~180 MB, and retiring the Python core defeats the point of the project), and a Tauri or Wails shell with a Python sidecar (TCC attribution does not cross to a sidecar for free — it must carry the same Team ID and `com.apple.security.inherit`, a lot of machinery for a personal tool).
+
+
+### 4.1 The live overlay
+
+**Decision: a native `NSPanel`, not a second WebView, and it must never take focus.**
+
+The transcript is about to be pasted into whatever app is frontmost, and `paste.py` sends ⌘V to exactly that.
+A preview window that takes key focus would make talkie frontmost and paste into itself.
+So the overlay is built from the one AppKit configuration that cannot do that:
+
+| Property | Value | Why |
+|---|---|---|
+| style mask | borderless + `NSWindowStyleMaskNonactivatingPanel` | showing it does not activate the app |
+| level | above normal windows | visible over the app being dictated into |
+| collection behaviour | joins all spaces, stationary, full-screen auxiliary | follows the user rather than the desktop it was created on |
+| `ignoresMouseEvents` | `True` | a click where it sits reaches the window underneath |
+| `hidesOnDeactivate` | `False` | talkie is never the active app while it matters |
+
+It is shown with `orderFrontRegardless()`, never `makeKeyAndOrderFront_`.
+
+**Why not pywebview.** A second WebView window would mean reaching into its `NSWindow` to set all of the above anyway, plus a second page to build and style.
+The menu bar is already ~40 lines of PyObjC against `NSStatusItem` (§4); a caption strip is an `NSTextField` in a blurred panel and costs less than the HTML would.
+
+**It serves both modes.**
+Streaming fills it as deltas arrive; one-shot puts the finished transcript in it when the request returns.
+The reason for the overlay — not having to go and look somewhere else — is not conditional on paying for streaming.
+
+Every mutation is marshalled onto the main thread with `AppHelper.callAfter`, like the menu bar, because partials arrive on a socket reader thread and AppKit is not thread-safe.
 
 ## 5. The UI ↔ backend boundary
 
@@ -272,7 +363,7 @@ That is more machinery than the rest of the page combined, so it stays on `TALKI
 
 ## 8. Threading and shutdown
 
-Three threads, and only one of them may touch AppKit.
+Three long-lived threads, and only one of them may touch AppKit.
 
 | Thread | Owns |
 |---|---|
@@ -280,9 +371,13 @@ Three threads, and only one of them may touch AppKit.
 | listener | `pynput` chord detection |
 | worker | one per clip: transcribe, paste, write history |
 
+A streamed dictation adds two more for the length of the hold — a pump and a socket reader (§2.4) — plus sounddevice's own callback thread, which exists in both modes.
+All five are daemons and all are gone by the time `finish()` returns, so the count does not grow with use.
+
 State changes originate on the worker (a transcription finished) but the icon lives on the main thread, so every mutation is bounced across with `AppHelper.callAfter`.
-The recording and transcription code gains no UI calls: `Talkie` takes optional `on_state` and `on_record` observers and knows nothing about what implements them.
+The recording and transcription code gains no UI calls: `Talkie` takes optional `on_state`, `on_record` and `on_partial` observers and knows nothing about what implements them.
 A raising observer is caught and logged — a broken UI must never stop dictation.
+`on_partial` matters most here: it fires many times a second from the socket reader, so the overlay marshals rather than blocking that thread.
 
 **Quitting, and why it took four fixes.**
 A terminal-launched app that ignores Ctrl+C is unacceptable, and making it work meant unpicking four separate obstacles — each of which looked like the whole problem until the next one appeared.
@@ -352,9 +447,14 @@ Signing tiers are a requirement, not a design choice — see SPEC §5.4.
 - Whether the `js_api` relaunch-per-edit loop becomes annoying enough to justify the loopback HTTP server in §5.
 - ~~Whether `rumps` and `pywebview` can share a process~~ — **answered by spike, §4.** They cannot, but `rumps` is the replaceable half. Polling and FSEvents are both moot: the window is pushed to directly.
 - Whether the four-state push to the menu bar should be widened into an `onState` event for the window (§5).
+- Whether linear resampling to 24 kHz costs measurable accuracy against recording at 24 kHz throughout, which would make every clip 1.5× larger on disk and on the wire.
+- Whether the overlay should track the caret rather than sitting in a fixed place, which would need the Accessibility API to locate the focused text field.
+- Whether `finish()` should wait for the `completed` event at all, or paste the last partial immediately and accept that the final text can differ from what was pasted.
 
 ## 12. References
 
 - pywebview (native WebView windows for Python) — https://pywebview.flowrl.com/
 - rumps (macOS menu-bar apps in Python) — https://github.com/jaredks/rumps
 - py2app — https://py2app.readthedocs.io/
+- OpenAI realtime transcription — https://developers.openai.com/api/docs/guides/realtime-transcription
+- `NSPanel` and non-activating panels — https://developer.apple.com/documentation/appkit/nspanel

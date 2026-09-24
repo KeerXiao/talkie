@@ -1,5 +1,6 @@
 import pytest
 
+from talkie import providers
 from talkie.cli import check_key, main, parse_args
 from talkie.client import AuthError
 
@@ -50,6 +51,9 @@ def test_check_key_surfaces_a_bad_credential(monkeypatch, caplog):
 
 
 def test_missing_api_key_exits_nonzero(monkeypatch, caplog):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # Every provider's key, not just OpenRouter's: with any one of them set,
+    # startup now succeeds and main() would block in the hotkey loop.
+    for provider in providers.PROVIDERS.values():
+        monkeypatch.delenv(provider.env_var, raising=False)
     assert main([]) == 1
     assert "OPENROUTER_API_KEY" in caplog.text
