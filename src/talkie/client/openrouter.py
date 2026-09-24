@@ -15,7 +15,7 @@ from typing import Any
 import requests
 
 from talkie.audio import Clip
-from talkie.client.base import Transcript
+from talkie.client.base import KeyInfo, Transcript
 from talkie.client.errors import (
     AuthError,
     ClientError,
@@ -89,8 +89,15 @@ class OpenRouterClient:
             usage=body.get("usage") or {},
         )
 
-    def key_info(self) -> dict[str, Any]:
+    def check(self) -> KeyInfo:
         """Credential preflight: confirms the key works before recording."""
+        info = self.key_info()
+        limit = info.get("limit")
+        remaining = "unlimited" if limit is None else f"{limit - info.get('usage', 0):.2f}"
+        return KeyInfo(info.get("label") or "(unlabelled)", f"remaining {remaining}")
+
+    def key_info(self) -> dict[str, Any]:
+        """The raw /key payload. `check()` is what callers want."""
         return self._get("/key").get("data", {})
 
     # -- transport ---------------------------------------------------------

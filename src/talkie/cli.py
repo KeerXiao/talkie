@@ -9,7 +9,7 @@ import time
 
 from talkie.app import Talkie
 from talkie.audio import Recorder
-from talkie.client import ClientError
+from talkie.client import ClientError, TranscriptionClient
 from talkie.client.factory import for_config
 from talkie.config import Config, ConfigError
 from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
@@ -40,17 +40,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _client(config: Config):
+def _client(config: Config) -> TranscriptionClient:
     return for_config(config)
 
 
 def check_key(config: Config) -> None:
-    """Confirm the credential works before blaming the microphone."""
-    info = _client(config).key_info()
-    label = info.get("label") or "(unlabelled)"
-    limit = info.get("limit")
-    remaining = "unlimited" if limit is None else f"{limit - info.get('usage', 0):.2f}"
-    log.info("key ok · %s · remaining %s", label, remaining)
+    """Confirm the credential works before blaming the microphone.
+
+    What a provider will say about a key differs — OpenRouter quotes a
+    balance, OpenAI only confirms it works — so this prints whatever came back
+    rather than reaching for fields one backend happens to have.
+    """
+    log.info("key ok · %s · %s", config.provider, _client(config).check())
     if accessibility_trusted():
         log.info("accessibility ok · pasting will work")
     else:
@@ -78,8 +79,10 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s  %(message)s",
         datefmt="%H:%M:%S",
     )
-    # -v is for talkie's own tracing, not urllib3's connection chatter.
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    # -v is for talkie's own tracing, not the HTTP stacks' connection chatter.
+    # httpx2 is what the OpenAI SDK vendors, and it logs every request at INFO.
+    for noisy in ("urllib3", "httpx", "httpx2", "openai"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     try:
         # The settings page writes ~/.talkie/settings.json; both builds layer
         # it over the environment here, so `make run` and `make ui` never

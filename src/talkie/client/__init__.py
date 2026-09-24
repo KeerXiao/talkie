@@ -1,6 +1,6 @@
-"""Backend clients. `talkie.client.base` is the seam; OpenRouter is the impl."""
+"""Backend clients. `talkie.client.base` is the seam; the rest are impls."""
 
-from talkie.client.base import TranscriptionClient, Transcript
+from talkie.client.base import KeyInfo, TranscriptionClient, Transcript
 from talkie.client.errors import (
     AuthError,
     ClientError,
@@ -10,6 +10,7 @@ from talkie.client.errors import (
     ResponseError,
     ServerError,
 )
+from talkie.client.openai import OpenAIClient
 from talkie.client.openrouter import BASE_URL, OpenRouterClient
 
 __all__ = [
@@ -17,7 +18,9 @@ __all__ = [
     "BASE_URL",
     "ClientError",
     "InsufficientCreditsError",
+    "KeyInfo",
     "NetworkError",
+    "OpenAIClient",
     "OpenRouterClient",
     "RateLimitError",
     "ResponseError",
