@@ -8,7 +8,8 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 from talkie.audio import Clip, Recorder
-from talkie.client import ClientError, OpenRouterClient, TranscriptionClient
+from talkie.client import ClientError, TranscriptionClient
+from talkie.client.factory import for_config
 from talkie.config import Config
 from talkie.history import History, Interaction
 from talkie.hotkey import ChordListener, parse_hotkey
@@ -26,13 +27,6 @@ TRANSCRIBING = "transcribing"
 ERROR = "error"
 
 
-def _openrouter(config: Config) -> TranscriptionClient:
-    return OpenRouterClient(
-        api_key=config.api_key,
-        model=config.model,
-        language=config.language,
-        timeout=config.request_timeout,
-    )
 
 
 class Talkie:
@@ -60,7 +54,7 @@ class Talkie:
         # A client is bound to one model and language, so a settings change
         # builds a new one rather than mutating this one (DESIGN 2). The
         # factory is the seam that lets apply() do that with a fake, too.
-        self._new_client = client_factory or _openrouter
+        self._new_client = client_factory or for_config
         self.client = client or self._new_client(config)
         self.paster = paster or Paster(config.paste_settle)
         self.sound = sound or Player(config.sound_volume)

@@ -9,7 +9,8 @@ import time
 
 from talkie.app import Talkie
 from talkie.audio import Recorder
-from talkie.client import ClientError, OpenRouterClient
+from talkie.client import ClientError
+from talkie.client.factory import for_config
 from talkie.config import Config, ConfigError
 from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
 from talkie.settings import resolve
@@ -39,13 +40,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _client(config: Config) -> OpenRouterClient:
-    return OpenRouterClient(
-        api_key=config.api_key,
-        model=config.model,
-        language=config.language,
-        timeout=config.request_timeout,
-    )
+def _client(config: Config):
+    return for_config(config)
 
 
 def check_key(config: Config) -> None:
