@@ -197,9 +197,12 @@ def test_update_persists_and_applies(settings_api):
     assert result == {
         "ok": True,
         "persisted": True,
+        "runningMode": "batch",
         "settings": {
             "language": "zh",
+            "provider": "openrouter",
             "model": "m",
+            "mode": "batch",
             "sound_volume": 1.0,
             "history_keep": 50,
         },
@@ -234,20 +237,28 @@ def test_auto_detect_round_trips(settings_api):
     assert settings_api.applied[-1].language is None
 
 
-def test_a_broken_observer_does_not_lose_the_save(tmp_path):
-    """The settings are already written; a failure to apply must not undo that."""
+def test_a_change_that_will_not_apply_is_not_persisted(tmp_path):
+    """Saving first would leave the page reporting success over a file that
+    breaks the next start — a provider whose key was never exported does
+    exactly that (SPEC §6.9 #8)."""
 
     def explode(_):
-        raise RuntimeError("menu bar is gone")
+        raise RuntimeError("OpenAI needs OPENAI_API_KEY — it is not set")
 
+    store = SettingsStore(tmp_path / "settings.json")
     api = Api(
         History(root=tmp_path / "h"),
         clipboard=FakeClipboard(),
-        store=SettingsStore(tmp_path / "settings.json"),
+        store=store,
         on_settings_changed=explode,
     )
-    assert api.update_settings({"model": "other"})["ok"] is True
-    assert api.settings.model == "other"
+    result = api.update_settings({"provider": "openai"})
+
+    assert result["ok"] is False
+    assert "OPENAI_API_KEY" in result["error"]
+    assert result["field"] == "provider"  # the page points at the control
+    assert api.settings.provider == "openrouter"  # rolled back
+    assert not (tmp_path / "settings.json").exists()
 
 
 def test_an_unwritable_store_still_applies(tmp_path):
@@ -261,3 +272,35 @@ def test_an_unwritable_store_still_applies(tmp_path):
     result = api.update_settings({"model": "other"})
     assert result["ok"] is True and result["persisted"] is False
     assert api.settings.model == "other"
+
+
+def test_the_form_ships_the_whole_capability_table(settings_api):
+    """So the page can lock an impossible mode without asking per keystroke —
+    and without a second copy of the table that could disagree."""
+    form = settings_api.get_settings()
+    ids = [p["id"] for p in form["providers"]]
+    assert ids == ["openrouter", "openai"]
+    live = next(
+        m for p in form["providers"] if p["id"] == "openai"
+        for m in p["models"] if m["id"] == "gpt-live-transcribe"
+    )
+    assert live["modes"] == ["stream"]
+    assert live["pricePerMinute"] == 0.017
+    assert [m["id"] for m in form["modes"]] == ["stream", "batch"]
+
+
+def test_the_model_suggestions_follow_the_chosen_provider(settings_api):
+    assert "microsoft/mai-transcribe-2" in settings_api.get_settings()["models"]
+    settings_api.update_settings({"provider": "openai", "model": "whisper-1"})
+    models = settings_api.get_settings()["models"]
+    assert "whisper-1" in models and "microsoft/mai-transcribe-2" not in models
+
+
+def test_the_form_reports_what_will_actually_run(settings_api):
+    """The stored preference is batch; the model only streams."""
+    result = settings_api.update_settings(
+        {"provider": "openai", "model": "gpt-live-transcribe"}
+    )
+    assert result["settings"]["mode"] == "batch"
+    assert result["runningMode"] == "stream"
+    assert settings_api.get_settings()["runningMode"] == "stream"

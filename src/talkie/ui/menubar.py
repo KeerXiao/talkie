@@ -18,6 +18,7 @@ from Foundation import NSObject
 from PyObjCTools import AppHelper
 
 from talkie import app as states
+from talkie import providers
 
 log = logging.getLogger(__name__)
 
@@ -43,10 +44,18 @@ def status_label(state: str) -> str:
     return f"Status: {LABELS.get(state, LABELS[states.IDLE])}"
 
 
-def model_label(model: str, language: str | None = None) -> str:
-    """'Model: microsoft/mai-transcribe-2 · en'. Language is worth a glance
-    here: auto-detect and a wrong pin fail in the same silent way."""
-    return f"Model: {model} · {language or 'auto'}"
+def model_label(model: str, language: str | None = None, mode: str | None = None) -> str:
+    """'Model: gpt-live-transcribe · en · Streaming'.
+
+    Language is worth a glance because auto-detect and a wrong pin fail in the
+    same silent way. Mode is worth one because streaming costs roughly ten
+    times what one-shot does (SPEC §8), and nothing else on screen says which
+    is running.
+    """
+    parts = [model, language or "auto"]
+    if mode:
+        parts.append(providers.MODE_LABELS.get(mode, mode))
+    return "Model: " + " · ".join(parts)
 
 
 def stats_label(stats: dict) -> str:
@@ -105,6 +114,7 @@ class MenuBar:
         on_open_history,
         on_quit,
         language: str | None = None,
+        mode: str | None = None,
     ) -> None:
         self._target = _Target.alloc().initWithHandlers_(
             {"open_history": on_open_history, "quit": on_quit}
@@ -118,7 +128,7 @@ class MenuBar:
         self._status = self._info(menu, status_label(states.IDLE))
         self._info(menu, f"Hotkey: {hotkey}")
         # Retained: the settings page can change these while the app runs.
-        self._model = self._info(menu, model_label(model, language))
+        self._model = self._info(menu, model_label(model, language, mode))
         self._stats = self._info(menu, stats_label({}))
         menu.addItem_(NSMenuItem.separatorItem())
         self._action(menu, "Open History…", "openHistory:")
@@ -147,8 +157,8 @@ class MenuBar:
     def set_stats(self, stats: dict) -> None:
         AppHelper.callAfter(self._apply_stats, stats)
 
-    def set_model(self, model: str, language: str | None) -> None:
-        AppHelper.callAfter(self._apply_model, model, language)
+    def set_model(self, model: str, language: str | None, mode: str | None = None) -> None:
+        AppHelper.callAfter(self._apply_model, model, language, mode)
 
     def _apply_state(self, state: str) -> None:
         self._item.button().setTitle_(icon_for(state))
@@ -157,5 +167,5 @@ class MenuBar:
     def _apply_stats(self, stats: dict) -> None:
         self._stats.setTitle_(stats_label(stats))
 
-    def _apply_model(self, model: str, language: str | None) -> None:
-        self._model.setTitle_(model_label(model, language))
+    def _apply_model(self, model: str, language: str | None, mode: str | None = None) -> None:
+        self._model.setTitle_(model_label(model, language, mode))

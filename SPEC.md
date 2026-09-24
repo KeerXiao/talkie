@@ -46,6 +46,8 @@ The work is split so the audio → cloud → paste path is proven before any UI 
 | **M3** | Live transcripts | A second provider that streams, and an overlay that shows the words while they are being spoken. |
 | Later | — | Toggle mode, Windows/Linux, custom vocabulary, LLM cleanup pass, model fallback chain. |
 
+M1, M2 and M3 are delivered.
+
 M1 must pass its acceptance criteria before M2 starts.
 M2 observes M1's recording and transcription path; it does not change it.
 M3 is the first milestone that changes that path, and it does so behind a mode switch: the one-shot path stays exactly as M1 left it.

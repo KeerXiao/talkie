@@ -55,8 +55,15 @@ export interface Stats {
 export interface Settings {
   /** A language code, or the literal 'auto' to let the model detect it. */
   language: string
-  /** An OpenRouter model id. */
+  /** Which cloud to transcribe through: 'openrouter' or 'openai'. */
+  provider: string
+  /** A model id belonging to `provider`. Free text — see SettingsForm.models. */
   model: string
+  /**
+   * The preference: 'stream' or 'batch'. What actually runs is `runningMode`,
+   * because a model offering only one way to be driven overrides this.
+   */
+  mode: string
   /** Multiplies system output volume. 0 silences the cues. */
   sound_volume: number
   /** How many interactions history keeps before pruning the oldest. */
@@ -69,6 +76,38 @@ export interface Language {
   label: string
 }
 
+/** One transcription model, as `talkie.providers` describes it. */
+export interface Model {
+  id: string
+  label: string
+  /** Which of 'stream' / 'batch' this model can be driven as. */
+  modes: string[]
+  /** What it runs as when the user has expressed no preference it can honour. */
+  defaultMode: string
+  /** USD per minute of audio, or null when the model is priced per token. */
+  pricePerMinute: number | null
+  note: string
+}
+
+/** One cloud talkie can transcribe through. */
+export interface Provider {
+  id: string
+  label: string
+  /** The environment variable holding its key. Named when the key is missing. */
+  envVar: string
+  defaultModel: string
+  models: Model[]
+  /** Whether any of its models stream. */
+  streams: boolean
+  note: string
+}
+
+/** One way a model can be driven. */
+export interface Mode {
+  id: string
+  label: string
+}
+
 /** Everything the settings page needs to draw itself, in one call. */
 export interface SettingsForm {
   settings: Settings
@@ -76,6 +115,12 @@ export interface SettingsForm {
   languages: Language[]
   /** Suggestions for the model field, which stays free text. */
   models: string[]
+  /** The whole capability table, so the page can lock an impossible mode
+   * without a round trip per keystroke. */
+  providers: Provider[]
+  modes: Mode[]
+  /** What the current provider+model+mode combination actually runs as. */
+  runningMode: string
   limits: { maxVolume: number; maxKeep: number }
 }
 
@@ -89,6 +134,8 @@ export type SettingsResult =
       /** False when the change applied but could not be written to disk. */
       persisted: boolean
       settings: Settings
+      /** What the saved combination actually runs as. */
+      runningMode: string
     }
   | {
       ok: false
@@ -124,8 +171,10 @@ export interface TalkieApi {
   /** Current settings plus the choices the form renders. */
   get_settings(): Promise<SettingsForm>
   /**
-   * Validate, persist and apply a partial change; absent keys keep their value.
-   * Takes effect on the running app immediately — no restart.
+   * Validate, apply and persist a partial change; absent keys keep their value.
+   * Takes effect on the running app immediately — no restart. A change that
+   * cannot be applied (a provider whose key was never exported) is rolled back
+   * and never written, so `ok: false` means nothing changed.
    */
   update_settings(patch: Partial<Settings>): Promise<SettingsResult>
 }

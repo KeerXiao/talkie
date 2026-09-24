@@ -121,7 +121,9 @@ class TalkieApp:
         self.config = settings.apply_to(self.config)
         self.talkie.apply(self.config)
         if self.menubar is not None:
-            self.menubar.set_model(self.config.model, self.config.language)
+            self.menubar.set_model(
+                self.config.model, self.config.language, self.config.running_mode
+            )
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -130,7 +132,13 @@ class TalkieApp:
         # CPython only writes the signal wakeup byte when the signal lands on
         # the *main* thread — so every other thread must refuse it.
         self._block_signals_in_future_threads()
-        log.info("hotkey %s · model %s", self.talkie.chord, self.config.model)
+        log.info(
+            "hotkey %s · %s %s · %s",
+            self.talkie.chord,
+            self.config.provider,
+            self.config.model,
+            self.config.running_mode,
+        )
         if not accessibility_trusted():
             log.warning("Accessibility is not granted — %s", ACCESSIBILITY_HINT)
 
@@ -143,6 +151,7 @@ class TalkieApp:
             hotkey=str(self.talkie.chord),
             model=self.config.model,
             language=self.config.language,
+            mode=self.config.running_mode,
             on_open_history=self.show_history,
             on_quit=self.stop,
         )

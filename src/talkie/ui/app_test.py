@@ -11,7 +11,10 @@ from talkie.ui.app import TalkieApp
 
 class FakeMenuBar:
     def __init__(self):
-        self.states, self.stats = [], []
+        self.states, self.stats, self.models = [], [], []
+
+    def set_model(self, model, language, mode=None):
+        self.models.append((model, language, mode))
 
     def set_state(self, state):
         self.states.append(state)
@@ -213,3 +216,48 @@ def test_a_tap_too_short_to_transcribe_takes_the_strip_down(overlaid):
 def test_a_failed_clip_also_settles(overlaid):
     overlaid._on_state("error")
     assert overlaid.overlay.calls == [("settle",)]
+
+
+def test_choosing_a_provider_with_no_key_says_which_one_to_export(tmp_path):
+    """SPEC §6.9 #8: OpenAI still appears in the page with only an OpenRouter
+    key set, and choosing it reports the variable rather than failing at the
+    next dictation."""
+    from talkie.config import Config
+    from talkie.settings import SettingsStore
+
+    app = TalkieApp(
+        Config.from_env({"OPENROUTER_API_KEY": "sk-or"}),
+        history=History(root=tmp_path / "h"),
+        store=SettingsStore(tmp_path / "settings.json"),
+    )
+    app.menubar = FakeMenuBar()
+    app.window = FakeWindow()
+
+    result = app.api.update_settings({"provider": "openai"})
+
+    assert result["ok"] is False
+    assert "OPENAI_API_KEY" in result["error"]
+    assert app.config.provider == "openrouter"   # still usable
+    assert app.talkie.config.provider == "openrouter"
+    assert not (tmp_path / "settings.json").exists()
+
+
+def test_switching_provider_takes_effect_without_a_restart(tmp_path):
+    """SPEC §6.9 #7."""
+    from talkie.client.openai import OpenAIClient
+    from talkie.config import Config
+    from talkie.settings import SettingsStore
+
+    app = TalkieApp(
+        Config.from_env({"OPENROUTER_API_KEY": "sk-or", "OPENAI_API_KEY": "sk-oai"}),
+        history=History(root=tmp_path / "h"),
+        store=SettingsStore(tmp_path / "settings.json"),
+    )
+    app.menubar = FakeMenuBar()
+    app.window = FakeWindow()
+
+    result = app.api.update_settings({"provider": "openai", "model": "whisper-1"})
+
+    assert result["ok"] is True
+    assert isinstance(app.talkie.client, OpenAIClient)
+    assert app.talkie.client.api_key == "sk-oai"

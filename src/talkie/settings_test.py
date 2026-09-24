@@ -6,12 +6,14 @@ import json
 
 import pytest
 
+from talkie import providers
 from talkie.config import Config
 from talkie.settings import (
     AUTO,
     Settings,
     SettingsError,
     SettingsStore,
+    models_for,
     resolve,
 )
 
@@ -170,3 +172,60 @@ def test_resolve_layers_the_file_over_the_environment(store):
     assert merged.language == "zh" and merged.history_keep == 10
     assert merged.api_key == "sk-test"
     assert settings.language == "zh"
+
+
+# -- provider and mode (M3) ------------------------------------------------
+
+
+def test_switching_provider_repoints_the_key_without_a_restart():
+    """The keys are already resolved from the environment; the swap picks the
+    right one rather than writing anything to disk."""
+    base = Config.from_env({"OPENROUTER_API_KEY": "sk-or", "OPENAI_API_KEY": "sk-oai"})
+    applied = Settings.from_config(base).merge({"provider": "openai"}).apply_to(base)
+    assert applied.provider == "openai"
+    assert applied.api_key == "sk-oai"
+
+
+def test_choosing_a_provider_with_no_key_leaves_it_empty_for_the_factory():
+    """Empty rather than wrong: the factory names the variable to export
+    (SPEC §6.9 #8), instead of a 401 at the next dictation."""
+    base = Config.from_env({"OPENROUTER_API_KEY": "sk-or"})
+    applied = Settings.from_config(base).merge({"provider": "openai"}).apply_to(base)
+    assert applied.provider == "openai"
+    assert applied.api_key == ""
+
+
+def test_staying_on_one_provider_never_touches_the_key():
+    base = config()  # built by hand, so it carries no `keys` map at all
+    assert Settings(model="m").apply_to(base).api_key == "sk-test"
+
+
+def test_an_unknown_provider_is_rejected():
+    with pytest.raises(SettingsError, match="provider"):
+        Settings().merge({"provider": "azure"})
+
+
+def test_an_unknown_mode_is_rejected():
+    with pytest.raises(SettingsError, match="mode"):
+        Settings().merge({"mode": "realtime"})
+
+
+def test_the_model_has_the_last_word_on_the_mode():
+    """A stored preference never makes a model do what it cannot."""
+    live = Settings(provider="openai", model="gpt-live-transcribe", mode="batch")
+    assert live.running_mode == "stream"
+    once = Settings(provider="openai", model="whisper-1", mode="stream")
+    assert once.running_mode == "batch"
+
+
+def test_the_model_suggestions_come_from_the_provider_table():
+    """A second hardcoded list here is the drift providers.py exists to stop."""
+    assert models_for("openai") == [m.id for m in providers.get("openai").models]
+    assert "gpt-live-transcribe" in models_for("openai")
+    assert "gpt-live-transcribe" not in models_for("openrouter")
+
+
+def test_provider_and_mode_survive_a_round_trip_through_the_file(store):
+    store.save(Settings(provider="openai", model="whisper-1", mode="stream"))
+    loaded = store.load(Settings())
+    assert (loaded.provider, loaded.model, loaded.mode) == ("openai", "whisper-1", "stream")

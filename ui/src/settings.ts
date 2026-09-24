@@ -1,7 +1,7 @@
 /**
  * The settings panel.
  *
- * Two decisions shape it:
+ * Three decisions shape it:
  *
  * **There is no Save button.** Every control writes on change, the way a macOS
  * preference pane does, and Python applies it to the running app immediately —
@@ -10,12 +10,15 @@
  *
  * **The panel owns its own DOM.** It builds once and mutates in place rather
  * than re-rendering, because a re-render while you are halfway through typing a
- * model id would take the caret with it.
+ * model id would take the caret with it. The one exception is a change of
+ * provider or model, which changes what the other controls may offer.
  *
- * The choices — the language list, the limits — come from `get_settings()`
- * rather than being repeated here; settings.py is where they are defined.
+ * **Capability comes from Python, not from here.** `get_settings()` ships the
+ * whole provider table, so the page can grey out a mode a model cannot honour
+ * without asking per keystroke — and without a second copy of the table that
+ * could disagree with `talkie.providers`.
  */
-import type { Settings, SettingsForm, SettingsResult } from './bridge'
+import type { Model, Provider, Settings, SettingsForm, SettingsResult } from './bridge'
 import { api, el } from './dom'
 
 /** Cached so switching tabs does not blank the form while it refetches. */
@@ -25,7 +28,13 @@ const HINTS: Record<keyof Settings, string> = {
   language:
     'Pin this when you always dictate in one language — it stops the model ' +
     'guessing wrong on a short clip. Auto-detect handles switching mid-session.',
-  model: 'Any OpenRouter transcription model id. Takes effect on the next clip.',
+  provider:
+    'Which cloud transcribes your audio. Each has its own key, read from the ' +
+    'environment — switching needs no restart, but the key has to be exported.',
+  model: 'Any transcription model id from this provider. Takes effect on the next clip.',
+  mode:
+    'Streaming shows the words as you speak them; one-shot sends the finished ' +
+    'clip when you let go.',
   sound_volume:
     'The start, stop and error cues. You are looking at another app while ' +
     'dictating, so these are the only feedback you get. 0 turns them off.',
@@ -41,7 +50,9 @@ export function settingsPanel(): HTMLElement {
     if (!form) return
     panel.replaceChildren(
       field('Language', languageInput(), HINTS.language),
+      field('Provider', providerInput(), providerHint()),
       field('Model', modelInput(), HINTS.model),
+      field('Mode', modeInput(), modeHint()),
       field('Sound cues', volumeInput(), HINTS.sound_volume),
       field('Keep history', keepInput(), HINTS.history_keep),
       status,
@@ -55,7 +66,10 @@ export function settingsPanel(): HTMLElement {
       status.textContent = result.error
       return
     }
-    form = { ...form!, settings: result.settings }
+    const reshaped =
+      result.settings.provider !== form!.settings.provider ||
+      result.settings.model !== form!.settings.model
+    form = { ...form!, settings: result.settings, runningMode: result.runningMode }
     status.className = 'settings-status'
     status.textContent = result.persisted
       ? 'Saved.'
@@ -67,6 +81,9 @@ export function settingsPanel(): HTMLElement {
     if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
       if (control.value !== String(stored)) control.value = String(stored)
     }
+    // A new provider brings a different model list, and a new model can lock
+    // the mode. Those are the only saves worth rebuilding the form for.
+    if (reshaped) draw()
   }
 
   async function save(
@@ -82,6 +99,16 @@ export function settingsPanel(): HTMLElement {
       status.className = 'settings-status bad'
       status.textContent = 'Could not reach the app. Is it still running?'
     }
+  }
+
+  // -- what the table says about the current choice ------------------------
+
+  function provider(): Provider | undefined {
+    return form!.providers.find((p) => p.id === form!.settings.provider)
+  }
+
+  function model(): Model | undefined {
+    return provider()?.models.find((m) => m.id === form!.settings.model)
   }
 
   // -- controls -----------------------------------------------------------
@@ -107,6 +134,28 @@ export function settingsPanel(): HTMLElement {
     return select
   }
 
+  function providerInput(): HTMLSelectElement {
+    const select = el('select', 'control')
+    for (const p of form!.providers) {
+      const option = el('option', undefined, p.streams ? `${p.label} — streams` : p.label)
+      option.value = p.id
+      select.append(option)
+    }
+    select.value = form!.settings.provider
+    select.addEventListener('change', () => {
+      // The model moves with the provider. Leaving it behind would send an
+      // OpenRouter id to OpenAI, which fails on the first clip rather than here.
+      const chosen = form!.providers.find((p) => p.id === select.value)
+      void save({ provider: select.value, model: chosen?.defaultModel }, select, 'provider')
+    })
+    return select
+  }
+
+  function providerHint(): string {
+    const chosen = provider()
+    return chosen?.note ? `${HINTS.provider} ${chosen.note}` : HINTS.provider
+  }
+
   function modelInput(): HTMLElement {
     const wrap = el('div', 'inline')
     const input = el('input', 'control wide')
@@ -120,9 +169,9 @@ export function settingsPanel(): HTMLElement {
     // suggestions only appear if the browser can resolve the id.
     const list = el('datalist')
     list.id = 'models'
-    for (const model of form!.models) {
-      const option = el('option')
-      option.value = model
+    for (const known of provider()?.models ?? []) {
+      const option = el('option', undefined, known.label)
+      option.value = known.id
       list.append(option)
     }
 
@@ -137,6 +186,37 @@ export function settingsPanel(): HTMLElement {
     input.addEventListener('blur', commit)
     wrap.append(input, list)
     return wrap
+  }
+
+  function modeInput(): HTMLSelectElement {
+    const select = el('select', 'control')
+    const offered = model()?.modes ?? null
+    for (const { id, label } of form!.modes) {
+      const option = el('option', undefined, label)
+      option.value = id
+      // A model id typed by hand is not in the table, and is assumed one-shot
+      // rather than guessed at — so leave both choices open for it.
+      option.disabled = offered !== null && !offered.includes(id)
+      select.append(option)
+    }
+    // What will happen, not what was asked for: a one-mode model overrides the
+    // stored preference, and showing the preference would be a lie.
+    select.value = form!.runningMode
+    select.disabled = offered !== null && offered.length < 2
+    select.addEventListener('change', () => save({ mode: select.value }, select, 'mode'))
+    return select
+  }
+
+  function modeHint(): string {
+    const chosen = model()
+    if (!chosen) return `${HINTS.mode} An unlisted model is assumed one-shot.`
+    if (chosen.modes.length < 2) {
+      const [single = ''] = chosen.modes
+      const only = form!.modes.find((m) => m.id === single)
+      const label = (only?.label ?? single).toLowerCase()
+      return `${chosen.label} only runs ${label}. ${price(chosen)}`
+    }
+    return `${HINTS.mode} ${price(chosen)}`
   }
 
   function volumeInput(): HTMLElement {
@@ -190,6 +270,19 @@ export function settingsPanel(): HTMLElement {
 function volumeLabel(volume: number): string {
   if (volume === 0) return 'Off'
   return `${Math.round(volume * 100)}%`
+}
+
+/**
+ * What an hour of this model costs, or that nobody can say.
+ *
+ * Per hour rather than per minute because the difference worth seeing before
+ * choosing is the ten-fold one between streaming and one-shot, and cents per
+ * minute hide it. A model priced per token shows no figure at all: an invented
+ * number would undermine the only reason the line is here.
+ */
+function price(model: Model): string {
+  if (model.pricePerMinute === null) return 'Priced per token, so no cost is shown.'
+  return `About $${(model.pricePerMinute * 60).toFixed(2)} an hour of audio.`
 }
 
 function field(name: string, control: HTMLElement, hint: string): HTMLElement {
