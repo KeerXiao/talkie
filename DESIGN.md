@@ -255,6 +255,17 @@ So the overlay is built from the one AppKit configuration that cannot do that:
 
 It is shown with `orderFrontRegardless()`, never `makeKeyAndOrderFront_`.
 
+Verified by running it against a live `NSApplication` rather than asserted: with Chrome frontmost, showing the panel left Chrome frontmost, `NSApp.isActive()` stayed false, and the panel reported `canBecomeKeyWindow == False`, `canBecomeMainWindow == False`, `ignoresMouseEvents == True` at window level 25.
+None of that is observable from a unit test — the panel has to be on screen with a real app behind it — so the test suite covers the text and visibility policy and the panel's behaviour is checked by hand.
+
+| State | Strip |
+|---|---|
+| recording | `Listening…`, then partials as they arrive |
+| transcribing, one-shot | `…` — nothing has come back yet, but the hotkey was heard |
+| transcribing, streamed | unchanged; the last partial is still the best thing to show |
+| a clip finished or failed | the transcript, or the error, then fades after 1.6 s |
+| a tap too short to transcribe | taken down — it writes no history row, so nothing else would |
+
 **Why not pywebview.** A second WebView window would mean reaching into its `NSWindow` to set all of the above anyway, plus a second page to build and style.
 The menu bar is already ~40 lines of PyObjC against `NSStatusItem` (§4); a caption strip is an `NSTextField` in a blurred panel and costs less than the HTML would.
 

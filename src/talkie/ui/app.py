@@ -22,7 +22,7 @@ import webview
 from AppKit import NSApplication
 from PyObjCTools import AppHelper
 
-from talkie.app import IDLE, Talkie
+from talkie.app import ERROR, IDLE, RECORDING, TRANSCRIBING, Talkie
 from talkie.config import Config
 from talkie.history import History, Interaction
 from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
@@ -30,6 +30,7 @@ from talkie.settings import Settings, SettingsStore
 from talkie.ui import branding, dock
 from talkie.ui.api import Api
 from talkie.ui.menubar import MenuBar
+from talkie.ui.overlay import Overlay
 from talkie.ui.window import HistoryWindow
 
 log = logging.getLogger(__name__)
@@ -59,12 +60,15 @@ class TalkieApp:
         )
         self.window = HistoryWindow(self.api)
         self.menubar: MenuBar | None = None
+        # Built in run(), on the main thread, before the loop starts.
+        self.overlay: Overlay | None = None
         self._delegate = None  # AppKit does not retain the app delegate
         self.talkie = Talkie(
             config,
             history=self.history,
             on_state=self._on_state,
             on_record=self._on_record,
+            on_partial=self._on_partial,
         )
         self._stopping = False
 
@@ -78,10 +82,33 @@ class TalkieApp:
     def _on_state(self, state: str) -> None:
         if self.menubar is not None:
             self.menubar.set_state(state)
+        if self.overlay is None:
+            return
+        if state == RECORDING:
+            self.overlay.show()
+        elif state == TRANSCRIBING and not self.config.streaming:
+            # One-shot has nothing to show yet, but the strip staying up says
+            # the hotkey was heard — the feature is not conditional on paying
+            # for streaming (SPEC §6.4).
+            self.overlay.show(state="working")
+        elif state in (IDLE, ERROR):
+            # A tap too short to transcribe writes no history row, so this is
+            # the only thing that takes the strip down again. A clip that did
+            # produce one is already fading and `settle` leaves it alone.
+            self.overlay.settle()
+
+    def _on_partial(self, text: str) -> None:
+        """Every delta, straight off the socket reader thread."""
+        if self.overlay is not None:
+            self.overlay.update(text)
 
     def _on_record(self, entry: Interaction) -> None:
         if self.menubar is not None:
             self.menubar.set_stats(self.api.stats())
+        if self.overlay is not None:
+            # The history row is the one place that knows how it ended, for
+            # both modes and for a failure.
+            self.overlay.finish(entry.text or (entry.error or ""))
         self.window.refresh()
 
     def _on_settings(self, settings: Settings) -> None:
@@ -121,6 +148,7 @@ class TalkieApp:
         )
         self.menubar.set_state(IDLE)
         self.menubar.set_stats(self.api.stats())
+        self.overlay = Overlay()
 
         self.talkie.listener.start()
         # After the window exists: callAfter queued before there is anything to
@@ -216,5 +244,7 @@ class TalkieApp:
         if self._stopping:
             return
         self._stopping = True
+        if self.overlay is not None:
+            self.overlay.hide()
         self.talkie.listener.stop()
         self.window.destroy()  # unblocks webview.start()

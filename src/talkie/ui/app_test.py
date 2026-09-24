@@ -113,3 +113,103 @@ def test_the_pump_stops_once_stopping(app, monkeypatch):
     app._stopping = True
     app._pump()
     assert len(scheduled) == 1  # not rescheduled again
+
+
+# -- the live overlay (M3) -------------------------------------------------
+
+
+class FakeOverlay:
+    def __init__(self):
+        self.calls = []
+
+    def show(self, text="", state=""):
+        self.calls.append(("show", text, state))
+
+    def update(self, text):
+        self.calls.append(("update", text))
+
+    def finish(self, text):
+        self.calls.append(("finish", text))
+
+    def settle(self):
+        self.calls.append(("settle",))
+
+    def hide(self):
+        self.calls.append(("hide",))
+
+
+@pytest.fixture
+def overlaid(app):
+    app.overlay = FakeOverlay()
+    return app
+
+
+def test_the_strip_appears_when_recording_starts(overlaid):
+    overlaid._on_state("recording")
+    assert overlaid.overlay.calls == [("show", "", "")]
+
+
+def test_partials_go_straight_to_the_strip(overlaid):
+    overlaid._on_partial("the quick")
+    overlaid._on_partial("the quick brown")
+    assert overlaid.overlay.calls == [("update", "the quick"), ("update", "the quick brown")]
+
+
+def test_a_one_shot_clip_keeps_the_strip_up_while_it_waits(overlaid):
+    """The overlay is not conditional on paying for streaming (SPEC §6.4)."""
+    assert not overlaid.config.streaming
+    overlaid._on_state("transcribing")
+    assert overlaid.overlay.calls == [("show", "", "working")]
+
+
+def test_a_streamed_clip_does_not_blank_the_strip_on_release(overlaid):
+    """Its last partial is still the best thing to show."""
+    from dataclasses import replace
+
+    overlaid.config = replace(
+        overlaid.config, provider="openai", model="gpt-live-transcribe"
+    )
+    assert overlaid.config.streaming
+    overlaid._on_state("transcribing")
+    assert overlaid.overlay.calls == []
+
+
+def test_the_finished_transcript_is_shown_then_left_to_fade(overlaid, tmp_path):
+    from talkie.history import Interaction
+
+    overlaid._on_record(Interaction(id="1", started_at=None, duration=1.0,
+                                    model="m", text="all done"))
+    assert ("finish", "all done") in overlaid.overlay.calls
+
+
+def test_a_failure_says_what_went_wrong_rather_than_vanishing(overlaid):
+    from talkie.history import Interaction
+
+    overlaid._on_record(Interaction(id="1", started_at=None, duration=1.0,
+                                    model="m", text="", error="network unreachable"))
+    assert ("finish", "network unreachable") in overlaid.overlay.calls
+
+
+def test_quitting_takes_the_strip_down(overlaid):
+    overlaid.stop()
+    assert ("hide",) in overlaid.overlay.calls
+
+
+def test_every_observer_survives_having_no_overlay_yet(app):
+    """The observers can fire before run() has built it."""
+    app.overlay = None
+    app._on_state("recording")
+    app._on_partial("hello")
+    app.stop()
+
+
+def test_a_tap_too_short_to_transcribe_takes_the_strip_down(overlaid):
+    """It writes no history row, so nothing else would ever hide it."""
+    overlaid._on_state("recording")
+    overlaid._on_state("idle")
+    assert overlaid.overlay.calls[-1] == ("settle",)
+
+
+def test_a_failed_clip_also_settles(overlaid):
+    overlaid._on_state("error")
+    assert overlaid.overlay.calls == [("settle",)]
