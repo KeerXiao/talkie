@@ -61,10 +61,11 @@ def test_missing_api_key_exits_nonzero(monkeypatch, caplog):
 
 def test_check_key_works_for_every_provider_the_factory_builds():
     """`--check` used to call an OpenRouter-only method, so adding a provider
-    would have turned a bad key into a traceback."""
-    from talkie.client.factory import for_config
+    would have turned a bad key into a traceback. Both providers' defaults are
+    covered, including OpenAI's, which is stream-only."""
+    from talkie.cli import _client
     from talkie.config import Config
 
     for provider in providers.PROVIDERS.values():
         config = Config.from_env({provider.env_var: "sk-test"})
-        assert callable(for_config(config).check)
+        assert callable(_client(config).check)

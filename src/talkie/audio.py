@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import wave
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -34,13 +35,21 @@ class Recorder:
         self.channels = channels
         self._frames: list[np.ndarray] = []
         self._stream: sd.InputStream | None = None
+        self._on_frame: Callable[[np.ndarray], None] | None = None
 
     @property
     def active(self) -> bool:
         return self._stream is not None
 
-    def start(self) -> None:
+    def start(self, on_frame: Callable[[np.ndarray], None] | None = None) -> None:
+        """Open the mic. `on_frame` sees every block as it arrives.
+
+        The tap is per-recording, not per-recorder: a streaming session lives
+        for exactly one hold of the hotkey, and leaving a stale callback bound
+        would feed the next dictation into a closed socket.
+        """
         self._frames = []
+        self._on_frame = on_frame
         self._stream = sd.InputStream(
             samplerate=self.sample_rate,
             channels=self.channels,
@@ -51,6 +60,7 @@ class Recorder:
 
     def stop(self) -> Clip:
         stream, self._stream = self._stream, None
+        self._on_frame = None
         if stream is not None:
             stream.stop()
             stream.close()
@@ -63,7 +73,19 @@ class Recorder:
     def _on_audio(self, indata, frames, time_info, status) -> None:
         if status:
             log.warning("audio status: %s", status)
-        self._frames.append(indata.copy())
+        block = indata.copy()
+        self._frames.append(block)
+        tap = self._on_frame
+        if tap is None:
+            return
+        # This runs on PortAudio's callback thread. An exception here would
+        # kill the stream and end the recording, so a broken tap costs the
+        # live transcript and nothing else — the clip is already captured.
+        try:
+            tap(block)
+        except Exception:
+            log.exception("audio tap failed")
+            self._on_frame = None
 
     def _to_wav(self, samples: np.ndarray) -> bytes:
         buf = io.BytesIO()

@@ -38,7 +38,7 @@ The UI attaches to `app.py` alone.
 Tests sit beside the code they cover, Go style: `hotkey.py` and `hotkey_test.py` are neighbours.
 `pyproject.toml` excludes `**/*_test.py` from the wheel so they never ship.
 
-Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`, `openai` (the `realtime` extra arrives with the streaming session), plus `pywebview` and PyObjC for the UI, and a `ui/` Vite + TypeScript project.
+Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`, `openai[realtime]`, plus `pywebview` and PyObjC for the UI, and a `ui/` Vite + TypeScript project.
 The frontend builds to a single self-contained `src/talkie/ui/web/index.html`, which is committed, so running talkie never requires Node.
 (`sounddevice` needs PortAudio.
 `pywebview` renders through the system WKWebView, so it embeds no browser engine.
@@ -54,8 +54,8 @@ The backend lives behind `talkie/client/`:
 | `client/base.py` | `TranscriptionClient` protocol, `Transcript` and `KeyInfo` — the seam another backend implements |
 | `client/errors.py` | `ClientError` and its subclasses, each carrying `.status` and `.retryable` |
 | `client/openrouter.py` | `OpenRouterClient`: request envelope, status→exception mapping, bounded retries |
-| `client/openai.py` | `OpenAIClient` (file endpoint); the realtime socket lands beside it |
-| `client/factory.py` | `for_config()` — the one place that turns provider + model into a one-shot client |
+| `client/openai.py` | `OpenAIClient` (file endpoint) and `OpenAIStreamingClient` (realtime socket) |
+| `client/factory.py` | `for_config()` and `streaming_for_config()` — one per mode, and each refuses what the other owns |
 
 Nothing above `client/` imports `requests` or sees an HTTP status.
 `OpenRouterClient` accepts a `requests.Session` and a `base_url`, so the request shape and every failure path are asserted without a live call.
@@ -154,6 +154,11 @@ Text is tracked per item id and joined in arrival order, because a long hold can
 - **Turn detection is off.**
 Push-to-talk already knows where the turn ends.
 Server VAD would cut on a mid-sentence pause and commit audio the user had not finished speaking.
+- **The socket is opened with `intent=transcription`, not a model.**
+The `model` query parameter names a realtime *session* model; a transcription session does not have one, and its transcription model belongs in `session.audio.input.transcription` instead.
+Passing it both ways is rejected as `invalid_model` — but only after the socket is up, so it surfaces mid-clip rather than at connect, and only against the live API.
+- **Latency is measured from the release, not from `open()`.**
+A streamed session opens before the user has spoken, so timing from there would record the length of the dictation instead of the wait after it, and history rows would not be comparable with one-shot ones.
 
 ## 3. Recording, hotkey, and cues
 

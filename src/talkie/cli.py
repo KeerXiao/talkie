@@ -9,8 +9,8 @@ import time
 
 from talkie.app import Talkie
 from talkie.audio import Recorder
-from talkie.client import ClientError, TranscriptionClient
-from talkie.client.factory import for_config
+from talkie.client import ClientError, StreamingClient, TranscriptionClient
+from talkie.client.factory import for_config, streaming_for_config
 from talkie.config import Config, ConfigError
 from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
 from talkie.settings import resolve
@@ -20,7 +20,7 @@ log = logging.getLogger("talkie")
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="talkie", description="Push-to-talk dictation through OpenRouter."
+        prog="talkie", description="Push-to-talk dictation through OpenRouter or OpenAI."
     )
     parser.add_argument(
         "--record",
@@ -40,8 +40,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _client(config: Config) -> TranscriptionClient:
-    return for_config(config)
+def _client(config: Config) -> TranscriptionClient | StreamingClient:
+    """Whichever client the running mode calls for. Both can `check()`."""
+    return streaming_for_config(config) if config.streaming else for_config(config)
 
 
 def check_key(config: Config) -> None:
@@ -59,17 +60,30 @@ def check_key(config: Config) -> None:
 
 
 def record_once(config: Config, seconds: float) -> None:
-    """Exercise the mic and the backend without needing Accessibility."""
+    """Exercise the mic and the backend without needing Accessibility.
+
+    Streaming runs the real path — a session opened before the mic and fed as
+    the audio arrives — because a one-shot request for a live model is exactly
+    what the rest of the code refuses to make.
+    """
     recorder = Recorder(config.sample_rate, config.channels)
+    client = _client(config)
+    session = client.open(on_partial=_show_partial) if config.streaming else None
+
     log.info("recording %.1fs…", seconds)
-    recorder.start()
+    recorder.start(on_frame=session.feed if session else None)
     time.sleep(seconds)
     clip = recorder.stop()
     log.info("captured %.1fs (%d bytes) → %s", clip.duration, len(clip.wav), config.model)
 
-    transcript = _client(config).transcribe(clip)
+    transcript = session.finish() if session else client.transcribe(clip)
     log.info("%.1fs · usage %s", transcript.latency, transcript.usage or "{}")
     print(transcript.text)
+
+
+def _show_partial(text: str) -> None:
+    """Partials go to the log in this milestone; the overlay comes next."""
+    log.info("… %s", text)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,7 +95,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     # -v is for talkie's own tracing, not the HTTP stacks' connection chatter.
     # httpx2 is what the OpenAI SDK vendors, and it logs every request at INFO.
-    for noisy in ("urllib3", "httpx", "httpx2", "openai"):
+    # The `openai` logger itself is left alone: its only INFO line says a
+    # request is being retried, which is exactly what -v is for.
+    for noisy in ("urllib3", "httpx2", "websockets"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     try:
         # The settings page writes ~/.talkie/settings.json; both builds layer
