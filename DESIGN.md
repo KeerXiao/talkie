@@ -51,7 +51,7 @@ The backend lives behind `talkie/client/`:
 
 | File | Holds |
 |---|---|
-| `client/base.py` | `TranscriptionClient` protocol, `Transcript` and `KeyInfo` — the seam another backend implements |
+| `client/base.py` | The `TranscriptionClient` and `StreamingClient`/`StreamingSession` protocols, `Transcript` and `KeyInfo` — the seam another backend implements |
 | `client/errors.py` | `ClientError` and its subclasses, each carrying `.status` and `.retryable` |
 | `client/openrouter.py` | `OpenRouterClient`: request envelope, status→exception mapping, bounded retries |
 | `client/openai.py` | `OpenAIClient` (file endpoint) and `OpenAIStreamingClient` (realtime socket) |
@@ -376,8 +376,12 @@ Three long-lived threads, and only one of them may touch AppKit.
 | listener | `pynput` chord detection |
 | worker | one per clip: transcribe, paste, write history |
 
-A streamed dictation adds two more for the length of the hold — a pump and a socket reader (§2.4) — plus sounddevice's own callback thread, which exists in both modes.
-All five are daemons and all are gone by the time `finish()` returns, so the count does not grow with use.
+A streamed dictation adds two more — a pump and a socket reader (§2.4) — plus sounddevice's own callback thread, which exists in both modes.
+The reader outlives the hold by a moment: `finish()` returns as soon as the final transcript arrives, and the reader exits microseconds later when the socket closes under it.
+
+The abandon paths are the ones worth being careful about, because they are the common ones: a tap shorter than `min_seconds` cancels a session that is still mid-handshake, and there is no socket to close yet.
+`cancel()` therefore records the intent, and the reader closes the connection the instant it has one — otherwise every stray tap would strand a socket and a thread, which is what SPEC §6.9's fiftieth consecutive dictation is there to catch.
+All five are daemons and none of them survive the dictation that created them.
 
 State changes originate on the worker (a transcription finished) but the icon lives on the main thread, so every mutation is bounced across with `AppHelper.callAfter`.
 The recording and transcription code gains no UI calls: `Talkie` takes optional `on_state`, `on_record` and `on_partial` observers and knows nothing about what implements them.

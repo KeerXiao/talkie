@@ -2,6 +2,7 @@
 realtime session driven against a fake socket."""
 
 import queue
+import threading
 import time
 
 import numpy as np
@@ -238,8 +239,7 @@ def test_a_talkie_error_passes_through_unwrapped():
 
 def test_the_resampler_stretches_16k_to_24k():
     """1.5 output samples per input sample, so the wire gets 50% more."""
-    out = _Resampler(16000)(np.zeros(1600, dtype=np.int16))
-    assert 2350 <= out.size <= 2400  # 1.5x, give or take the block seam
+    assert _Resampler(16000)(np.zeros(1600, dtype=np.int16)).size == 2399
 
 
 def test_resampling_block_by_block_matches_one_long_block():
@@ -252,9 +252,7 @@ def test_resampling_block_by_block_matches_one_long_block():
     blocked = np.concatenate([_Resampler.__call__(r := _Resampler(16000), signal[:1600])]
                              + [r(signal[1600:3200]), r(signal[3200:])])
 
-    assert abs(blocked.size - whole.size) <= 2
-    shared = min(blocked.size, whole.size)
-    assert np.array_equal(blocked[:shared], whole[:shared])
+    assert np.array_equal(blocked, whole)  # bit-exact, not merely close
 
 
 def test_the_resampler_survives_an_empty_or_single_sample_block():
@@ -269,8 +267,8 @@ def test_a_matching_rate_is_passed_straight_through():
     assert np.array_equal(_Resampler(TARGET_RATE)(block), block)
 
 
-def test_stereo_blocks_are_flattened_not_rejected():
-    """sounddevice hands over (frames, channels); mono is still 2-D."""
+def test_two_dimensional_blocks_are_accepted():
+    """sounddevice hands over (frames, channels), so a mono block is still 2-D."""
     assert _Resampler(16000)(np.zeros((320, 1), dtype=np.int16)).size > 0
 
 
@@ -287,8 +285,9 @@ class FakeEvent:
 class FakeConnection:
     """A realtime socket that answers a commit the way the server does."""
 
-    def __init__(self, on_commit=None, fail_on=None):
+    def __init__(self, on_commit=None, fail_on=None, connect_delay=0.0):
         self.events = queue.Queue()
+        self.connect_delay = connect_delay
         self.appended = []
         self.config = None
         self.closed = False
@@ -311,13 +310,19 @@ class FakeConnection:
             def commit(self):
                 if outer._fail_on == "commit":
                     raise RuntimeError("commit failed")
-                for event in (outer._on_commit or _completed("hello there")):
+                # `is None` on purpose: [] means "the server answers nothing",
+                # which is a case worth being able to express.
+                scripted = outer._on_commit
+                for event in (_completed("hello there") if scripted is None else scripted):
                     outer.events.put(event)
 
         self.session = Session()
         self.input_audio_buffer = Buffer()
 
     def __enter__(self):
+        # The real RealtimeConnectionManager does the whole WebSocket handshake
+        # here, which is the window every abandon-path bug lives in.
+        time.sleep(self.connect_delay)
         if self._fail_on == "connect":
             raise RuntimeError("could not connect")
         return self
@@ -546,3 +551,108 @@ def test_latency_is_the_wait_after_the_key_comes_up():
     speak(live)
     time.sleep(0.25)  # "speaking" — must not count towards latency
     assert live.finish().latency < 0.2
+
+
+# -- abandoning a session ------------------------------------------------
+
+
+def live_threads():
+    return [t for t in threading.enumerate() if t.name.startswith("talkie-rt")]
+
+
+def test_cancelling_during_the_handshake_still_closes_the_socket():
+    """A tap under min_seconds cancels well inside a real handshake. Without
+    this the socket and both threads outlive every stray tap (SPEC §6.9 #10)."""
+    connection = FakeConnection(connect_delay=0.2)
+    live, _ = session(connection=connection)
+    speak(live, seconds=0.05)
+    live.cancel()  # no socket exists yet
+
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not connection.closed:
+        time.sleep(0.02)
+    assert connection.closed is True
+
+
+def test_fifty_abandoned_dictations_leave_nothing_behind():
+    """SPEC §6.9 criterion 10, for the path that actually strands things."""
+    before = len(live_threads())
+    connections = []
+    for _ in range(50):
+        connection = FakeConnection(connect_delay=0.05)
+        live, _ = session(connection=connection)
+        speak(live, seconds=0.05)
+        live.cancel()
+        connections.append(connection)
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and live_threads():
+        time.sleep(0.05)
+    assert live_threads() == []
+    assert [c for c in connections if not c.closed] == []
+    assert len(live_threads()) == before
+
+
+def test_fifty_completed_dictations_leave_nothing_behind():
+    before = len(live_threads())
+    for _ in range(50):
+        live, _ = session()
+        speak(live, seconds=0.1)
+        live.finish()
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and live_threads():
+        time.sleep(0.05)
+    assert len(live_threads()) == before
+
+
+def test_cancel_is_safe_twice_and_after_finish():
+    """app.py cancels in a finally, after finish() has already returned."""
+    live, _ = session()
+    speak(live)
+    assert live.finish().text == "hello there"
+    live.cancel()
+    live.cancel()
+
+
+def test_a_session_cancelled_mid_finish_raises_rather_than_going_quiet():
+    """Quitting during a dictation does exactly this. An empty transcript would
+    tell the user they said nothing."""
+    live, _ = session(connection=FakeConnection(on_commit=[]))
+    speak(live)
+    threading.Timer(0.2, live.cancel).start()
+    with pytest.raises(ClientError, match="abandoned"):
+        live.finish()
+
+
+def test_a_hung_connect_is_bounded_by_one_deadline_not_two():
+    """Budgeting the two waits separately meant a hung connect cost
+    connect_timeout + final_timeout, with the hotkey dead for all of it."""
+    connection = FakeConnection(connect_delay=30)
+    client = OpenAIStreamingClient(api_key="sk", model="gpt-live-transcribe",
+                                   client=object())
+    live = _Session(
+        connect=lambda: connection, config=client.session_config(),
+        resample=_Resampler(16000), model="gpt-live-transcribe", sample_rate=16000,
+        connect_timeout=10.0, final_timeout=0.5,
+    )
+    live.start()
+    speak(live)
+    started = time.monotonic()
+    with pytest.raises(ClientError):
+        live.finish()
+    assert time.monotonic() - started < 1.5
+
+
+def test_a_session_update_that_fails_is_reported():
+    live, _ = session(connection=FakeConnection(fail_on="update"))
+    speak(live)
+    with pytest.raises(ClientError, match="session.update"):
+        live.finish()
+
+
+def test_a_commit_that_fails_is_reported():
+    live, _ = session(connection=FakeConnection(fail_on="commit"))
+    speak(live)
+    with pytest.raises(ClientError, match="commit"):
+        live.finish()
