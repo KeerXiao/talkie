@@ -23,8 +23,10 @@ from datetime import datetime, timezone
 
 import pyperclip
 
-from talkie.history import History, Interaction
 from talkie import providers
+from talkie.audio import Clip
+from talkie.client import ClientError, Transcript
+from talkie.history import History, Interaction
 from talkie.settings import (
     COERCE,
     LANGUAGES,
@@ -49,6 +51,7 @@ class Api:
         settings: Settings | None = None,
         store: SettingsStore | None = None,
         on_settings_changed: Callable[[Settings], None] | None = None,
+        on_retry: Callable[[Clip], Transcript] | None = None,
     ) -> None:
         self.history = history
         self.clipboard = clipboard
@@ -57,6 +60,9 @@ class Api:
         # The running app listens here to re-point the client and the menu bar.
         # Api itself knows nothing about either.
         self._on_settings_changed = on_settings_changed
+        # Sends a stored clip again. Injected for the same reason: which client
+        # and which mode is `Talkie`'s business, not the window's.
+        self._on_retry = on_retry
 
     # -- reads -------------------------------------------------------------
 
@@ -155,6 +161,43 @@ class Api:
             "settings": updated.to_json(),
             "runningMode": updated.running_mode,
         }
+
+    def retry(self, clip_id: str) -> dict:
+        """Send a failed clip's audio again, and rewrite its row with the result.
+
+        The row is replaced rather than added to: a retry is the same
+        dictation, and a second row would double the day's count and leave the
+        failure sitting above the transcript that replaced it.
+
+        Nothing is pasted — the window has focus, so a paste would land in
+        talkie. A transcript that arrives can be copied from the row like any
+        other.
+        """
+        entry = self.history.get(clip_id)
+        if entry is None:
+            return {"ok": False, "error": "that clip is no longer in history"}
+        wav = self.history.audio(clip_id)
+        if not wav:
+            return {"ok": False, "error": "its audio was not kept, so there is nothing to send"}
+        if self._on_retry is None:
+            return {"ok": False, "error": "this build cannot transcribe"}
+
+        try:
+            transcript = self._on_retry(Clip(wav, entry.duration))
+        except ClientError as exc:
+            return self._retried(clip_id, error=str(exc))
+        except Exception:
+            log.exception("could not retry %s", clip_id)
+            return self._retried(clip_id, error="unexpected failure")
+        if not transcript.text:
+            return self._retried(clip_id, error="empty transcript")
+        return self._retried(clip_id, transcript=transcript)
+
+    def _retried(self, clip_id: str, transcript=None, error: str | None = None) -> dict:
+        """Persist the outcome and hand back the row the page should now show."""
+        updated = self.history.rewrite(clip_id, transcript=transcript, error=error)
+        row = self._row(updated) if updated is not None else None
+        return {"ok": error is None, "error": error, "row": row}
 
     def copy(self, clip_id: str) -> bool:
         entry = self.history.get(clip_id)

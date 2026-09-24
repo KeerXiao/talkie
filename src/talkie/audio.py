@@ -27,6 +27,27 @@ class Clip:
         return self.duration > 0
 
 
+def samples(wav: bytes) -> tuple[np.ndarray, int]:
+    """A stored clip back as mono int16, with the rate it was recorded at.
+
+    History keeps the WAV, so a failed clip can be sent again without asking
+    the user to say it twice. The rate comes out of the header rather than the
+    config: the file is the authority on what it holds.
+    """
+    with wave.open(io.BytesIO(wav)) as source:
+        rate = source.getframerate()
+        channels = source.getnchannels()
+        frames = np.frombuffer(source.readframes(source.getnframes()), dtype=np.int16)
+    if channels > 1:
+        frames = frames.reshape(-1, channels).mean(axis=1).astype(np.int16)
+    return frames, rate
+
+
+def blocks(frames: np.ndarray, size: int = 1600) -> list[np.ndarray]:
+    """Split into mic-sized chunks, so a replay looks like a recording."""
+    return [frames[start:start + size] for start in range(0, len(frames), size)]
+
+
 class Recorder:
     """Records mono int16 audio between start() and stop()."""
 

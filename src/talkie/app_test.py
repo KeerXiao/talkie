@@ -456,8 +456,9 @@ class FakeStreamClient:
         self.error = error
         self.opened = 0
 
-    def open(self, on_partial=None):
+    def open(self, on_partial=None, sample_rate=None):
         self.opened += 1
+        self.sample_rate = sample_rate
         if self.error is not None:
             raise self.error
         self.session._on_partial = on_partial
@@ -586,3 +587,34 @@ def test_quitting_mid_dictation_does_not_race_the_release():
     app.close()
     app._on_disengage()
     assert stream.session.cancelled is True
+
+
+def test_a_retry_goes_through_the_one_shot_client_when_that_is_configured():
+    client = FakeClient(text="second time")
+    app = build(client=client)
+    assert app.transcribe_again(Clip(b"RIFF", 1.0)).text == "second time"
+    assert client.calls == 1
+
+
+def test_a_retry_of_a_streaming_config_replays_the_file_through_a_session():
+    """A stream-only model has no file endpoint, so the stored clip is fed in
+    exactly as the microphone would have fed it."""
+    import io
+    import wave
+
+    import numpy as np
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(np.zeros(16000, dtype=np.int16).tobytes())
+
+    app, stream = build_streaming()
+    transcript = app.transcribe_again(Clip(buf.getvalue(), 1.0))
+
+    assert transcript.text == "live text"
+    assert stream.opened == 1
+    assert sum(len(b) for b in stream.session.fed) == 16000
+    assert stream.session.cancelled is True  # the socket is not left open

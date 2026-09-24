@@ -399,6 +399,27 @@ A clip already in flight therefore finishes against the client it started with, 
 Every other setting is a value read at the moment it is used; the hotkey is held by a running pynput listener, so changing it means stopping that listener and starting another, and getting the engaged/pressed state right across the swap.
 That is more machinery than the rest of the page combined, so it stays on `TALKIE_HOTKEY` until it is asked for.
 
+### 7.1 Retrying a failed clip
+
+**Decision: the same row, the current settings, and no paste.**
+
+History already keeps the audio of every clip including the failures, so a dictation that did not come back is one click from being sent again rather than said again.
+
+- **The row is rewritten, not added to.**
+A retry is the same dictation. A second row would double the day's clip count and leave the failure sitting above the transcript that replaced it.
+`History.rewrite` keeps the id, the timestamp and the WAV, so a retry that fails again is still retryable.
+- **It uses whatever is configured now**, not the model that failed.
+The usual reason a clip failed is that something was wrong with the provider, and the point of retrying is that it has since changed.
+The row then names the model that actually produced the text.
+- **A stream-only model replays the file through a session.**
+`Talkie.transcribe_again` feeds the stored samples in exactly as the microphone would have, at the rate the file's own header reports rather than the mic's current one.
+The alternative — quietly substituting a one-shot model — would be the kind of silent swap avoided everywhere else, and this costs a handful of lines more.
+- **Nothing is pasted.**
+The history window has focus when the button is pressed, so a paste would land in talkie itself — the same reason the overlay never takes focus (§4.1).
+The transcript appears in the row and is copied from there.
+- **It runs on the bridge thread and the page waits.**
+A background worker plus a completion event would be more machinery than a corner case is worth; the button disables itself and says `Sending…`.
+
 ## 8. Threading and shutdown
 
 Three long-lived threads, and only one of them may touch AppKit.

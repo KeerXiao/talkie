@@ -3,7 +3,7 @@ import wave
 
 import numpy as np
 
-from talkie.audio import Clip, Recorder
+from talkie.audio import Clip, Recorder, blocks, samples
 
 
 def test_empty_clip_is_falsy():
@@ -70,3 +70,28 @@ def test_the_tap_does_not_survive_the_recording_that_installed_it():
     recorder._on_frame = lambda block: None
     recorder.stop()
     assert recorder._on_frame is None
+
+
+def test_a_stored_clip_decodes_back_to_what_was_recorded():
+    """History keeps the WAV so a failed clip can be sent again."""
+    recorder = Recorder(sample_rate=16000)
+    recorder._on_audio(np.arange(1600, dtype=np.int16).reshape(-1, 1), 1600, None, None)
+    clip = recorder.stop()
+
+    frames, rate = samples(clip.wav)
+    assert rate == 16000
+    assert np.array_equal(frames, np.arange(1600, dtype=np.int16))
+
+
+def test_the_rate_comes_from_the_file_not_the_caller():
+    """A clip recorded before the config changed still plays back correctly."""
+    recorder = Recorder(sample_rate=8000)
+    recorder._on_audio(np.zeros((800, 1), dtype=np.int16), 800, None, None)
+    assert samples(recorder.stop().wav)[1] == 8000
+
+
+def test_blocks_cover_every_sample_exactly_once():
+    frames = np.arange(4100, dtype=np.int16)
+    chunks = blocks(frames, 1600)
+    assert [len(c) for c in chunks] == [1600, 1600, 900]
+    assert np.array_equal(np.concatenate(chunks), frames)

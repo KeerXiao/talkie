@@ -57,6 +57,7 @@ class TalkieApp:
             settings=self.settings,
             store=store,
             on_settings_changed=self._on_settings,
+            on_retry=self._retry,
         )
         self.window = HistoryWindow(self.api)
         self.menubar: MenuBar | None = None
@@ -73,6 +74,15 @@ class TalkieApp:
         self._stopping = False
 
     # -- observers (called from the worker thread) -------------------------
+
+    def _retry(self, clip):
+        """Send a stored clip again, on the bridge thread that asked for it.
+
+        Deliberately synchronous: the page disables the button and waits. A
+        retry is a corner case, and a background worker plus a completion event
+        would be more machinery than the feature is worth.
+        """
+        return self.talkie.transcribe_again(clip)
 
     def show_history(self) -> None:
         """Bring the window forward — from the menu bar, or a dock-icon click."""

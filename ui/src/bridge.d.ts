@@ -144,6 +144,15 @@ export type SettingsResult =
       error: string
     }
 
+/** The outcome of one retry. Never a rejected Promise, like SettingsResult. */
+export interface RetryResult {
+  ok: boolean
+  /** Why it failed again, or null when it succeeded. */
+  error: string | null
+  /** The rewritten row, or null if the clip vanished underneath. */
+  row: Interaction | null
+}
+
 /** Everything the window may ask of Python. */
 export interface TalkieApi {
   /**
@@ -166,6 +175,14 @@ export interface TalkieApi {
   copy(clip_id: string): Promise<boolean>
   /** Remove one interaction and its audio. False if it was already gone. */
   delete(clip_id: string): Promise<boolean>
+  /**
+   * Send a stored clip's audio to the model again, through whatever is
+   * configured now, and rewrite its row with the outcome.
+   *
+   * The row is replaced, not added to — a retry is the same dictation. Nothing
+   * is pasted: the window has focus, so a paste would land in talkie.
+   */
+  retry(clip_id: string): Promise<RetryResult>
   /** Remove every interaction. Returns how many were deleted. */
   clear(): Promise<number>
   /** Current settings plus the choices the form renders. */

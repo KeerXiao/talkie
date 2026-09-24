@@ -88,6 +88,20 @@ function row(entry: Interaction): HTMLElement {
     })
     actions.append(copy)
   }
+  if (!entry.ok) {
+    // Only on a failure: the audio is still on disk, so a clip that did not
+    // come back is one click from being sent again rather than said again.
+    const retry = button('Retry', 'Send this audio to the model again', async () => {
+      retry.disabled = true
+      retry.textContent = 'Sending…'
+      const result = await api().retry(entry.id)
+      // The row is rewritten in place, so the whole list is reloaded rather
+      // than this one row patched — one path for loading history, as ever.
+      await load()
+      if (!result.ok) flash(retry, result.error ?? 'Failed')
+    })
+    actions.append(retry)
+  }
   const isPlaying = playing === entry.id
   const playBtn = button(isPlaying ? '■ Close' : '▶ Play', 'Play the original audio', () =>
     play(entry, playBtn),
