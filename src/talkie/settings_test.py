@@ -229,3 +229,47 @@ def test_provider_and_mode_survive_a_round_trip_through_the_file(store):
     store.save(Settings(provider="openai", model="whisper-1", mode="stream"))
     loaded = store.load(Settings())
     assert (loaded.provider, loaded.model, loaded.mode) == ("openai", "whisper-1", "stream")
+
+
+def test_a_model_stranded_by_a_provider_switch_falls_back():
+    """The shape a settings.json written before provider was a setting leaves
+    behind: an OpenRouter id with TALKIE_PROVIDER=openai. It 404s on the first
+    clip, so it is caught at load instead."""
+    stranded = Settings(provider="openai", model="microsoft/mai-transcribe-2")
+    assert stranded.reconciled().model == "gpt-live-transcribe"
+
+
+def test_an_unlisted_model_is_kept():
+    """The field is free text on purpose — both catalogues move faster than
+    providers.py, and a new id must still work."""
+    fresh = Settings(provider="openai", model="gpt-5-transcribe-future")
+    assert fresh.reconciled().model == "gpt-5-transcribe-future"
+
+
+def test_a_model_that_belongs_where_it_is_is_left_alone():
+    assert Settings(provider="openai", model="whisper-1").reconciled().model == "whisper-1"
+
+
+def test_reading_a_stale_file_reconciles_it(store):
+    store.path.write_text(
+        '{"provider": "openai", "model": "microsoft/mai-transcribe-2"}'
+    )
+    merged, settings = resolve(config(), store)
+    assert settings.model == "gpt-live-transcribe"
+    assert merged.model == "gpt-live-transcribe"
+
+
+def test_field_order_in_the_file_does_not_decide_the_outcome(store):
+    """Reconciling per field would judge the model against a provider about to
+    change, and lose the model when the file lists it first."""
+    store.path.write_text('{"model": "whisper-1", "provider": "openai"}')
+    assert store.load(Settings()).model == "whisper-1"
+    store.path.write_text('{"provider": "openai", "model": "whisper-1"}')
+    assert store.load(Settings()).model == "whisper-1"
+
+
+def test_switching_provider_alone_does_not_strand_the_model():
+    """The page sends the model with the provider, but a hand-written patch
+    need not."""
+    switched = Settings().merge({"provider": "openai"})
+    assert switched.model == "gpt-live-transcribe"

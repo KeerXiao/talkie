@@ -147,6 +147,30 @@ class Settings:
             "history_keep": self.history_keep,
         }
 
+    def reconciled(self) -> Settings:
+        """Drop a model that the table says belongs to a different provider.
+
+        The field is free text on purpose, so an id this version has never
+        heard of is kept — both catalogues move faster than `providers.py`.
+        An id the table says belongs to *another* provider is not that: it is
+        unambiguously wrong, and left alone it fails on the first clip with a
+        404 rather than here. A settings file written before provider was a
+        setting is exactly how one gets stranded.
+        """
+        if providers.model(self.provider, self.model) is not None:
+            return self
+        owner = next(
+            (p for p in providers.PROVIDERS.values() if p.model(self.model)), None
+        )
+        if owner is None or owner.id == self.provider:
+            return self
+        fallback = providers.default_model(self.provider)
+        log.warning(
+            "%s belongs to %s, not %s — using %s instead",
+            self.model, owner.label, self.provider, fallback,
+        )
+        return replace(self, model=fallback)
+
     @property
     def running_mode(self) -> str:
         """What a clip would actually run as, for a page that must grey out
@@ -168,7 +192,7 @@ class Settings:
         for field, coerce in COERCE.items():
             if field in patch:
                 changes[field] = coerce(patch[field])
-        return replace(self, **changes)
+        return replace(self, **changes).reconciled()
 
     def tolerant_merge(self, patch: dict) -> Settings:
         """Like `merge`, but a bad field is logged and skipped, not fatal.
@@ -176,15 +200,18 @@ class Settings:
         For reading the file: one hand-edited typo must not throw away the
         other three settings, nor stop the app from starting.
         """
-        merged = self
+        clean = {}
         for field, value in (patch or {}).items():
             if field not in COERCE:
                 continue
             try:
-                merged = merged.merge({field: value})
+                clean[field] = COERCE[field](value)
             except SettingsError as exc:
                 log.warning("ignoring %s in settings: %s", field, exc)
-        return merged
+        # Applied in one go, not field by field: reconciling after each would
+        # judge the model against a provider that is about to change, and a
+        # file listing model before provider would lose the model.
+        return replace(self, **clean).reconciled()
 
 
 def _language(value) -> str | None:
@@ -311,5 +338,5 @@ def resolve(config: Config, store: SettingsStore | None = None) -> tuple[Config,
     the terminal and windowed builds always agree on what is configured.
     """
     store = store or SettingsStore()
-    settings = store.load(Settings.from_config(config))
+    settings = store.load(Settings.from_config(config)).reconciled()
     return settings.apply_to(config), settings

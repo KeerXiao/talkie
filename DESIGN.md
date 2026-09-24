@@ -365,6 +365,12 @@ Provider is a setting, and switching it re-points `Config.api_key` from the keys
 That is what lets the swap happen with no restart and still no credential on disk.
 The key moves only when the provider does, so a `Config` built by hand — every test, and any future caller — keeps whatever key it was given.
 
+**A saved model that belongs to another provider is dropped at load.**
+The model field is free text on purpose — both catalogues move faster than `providers.py`, so an id this version has never heard of is kept and assumed one-shot (§2.3).
+An id the table says belongs to a *different* provider is not the same thing: it is unambiguously wrong, and left alone it fails with a 404 on the first clip rather than at startup.
+A `settings.json` written before provider was a setting is exactly how one gets stranded, so `Settings.reconciled()` runs on load and after every merge.
+It runs once over the whole patch, not per field: judging the model against a provider that is about to change would discard the model whenever a file happened to list it first.
+
 **A provider with no key fails at the factory, not at the next dictation.**
 Every provider is offered in the page whether or not its variable was exported, because hiding one would leave the user with nothing to act on.
 Choosing one you have no key for produces an empty `api_key`, and `client/factory.py` refuses it by name (SPEC §6.9 #8) — the alternative is a blank credential reaching the network and coming back a 401 several seconds into the next dictation.
