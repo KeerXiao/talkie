@@ -38,7 +38,7 @@ The UI attaches to `app.py` alone.
 Tests sit beside the code they cover, Go style: `hotkey.py` and `hotkey_test.py` are neighbours.
 `pyproject.toml` excludes `**/*_test.py` from the wheel so they never ship.
 
-Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`, `openai[realtime]`, plus `pywebview` and PyObjC for the UI, and a `ui/` Vite + TypeScript project.
+Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`, `openai` (the `realtime` extra arrives with the streaming session), plus `pywebview` and PyObjC for the UI, and a `ui/` Vite + TypeScript project.
 The frontend builds to a single self-contained `src/talkie/ui/web/index.html`, which is committed, so running talkie never requires Node.
 (`sounddevice` needs PortAudio.
 `pywebview` renders through the system WKWebView, so it embeds no browser engine.
@@ -51,11 +51,11 @@ The backend lives behind `talkie/client/`:
 
 | File | Holds |
 |---|---|
-| `client/base.py` | `TranscriptionClient` protocol and the `Transcript` value type — the seam another backend implements |
+| `client/base.py` | `TranscriptionClient` protocol, `Transcript` and `KeyInfo` — the seam another backend implements |
 | `client/errors.py` | `ClientError` and its subclasses, each carrying `.status` and `.retryable` |
 | `client/openrouter.py` | `OpenRouterClient`: request envelope, status→exception mapping, bounded retries |
-| `client/openai.py` | `OpenAIClient` (file endpoint) and `OpenAIStreamingClient` (realtime socket) |
-| `client/factory.py` | `for_config()` — the one place that turns provider + model + mode into an object |
+| `client/openai.py` | `OpenAIClient` (file endpoint); the realtime socket lands beside it |
+| `client/factory.py` | `for_config()` — the one place that turns provider + model into a one-shot client |
 
 Nothing above `client/` imports `requests` or sees an HTTP status.
 `OpenRouterClient` accepts a `requests.Session` and a `base_url`, so the request shape and every failure path are asserted without a live call.

@@ -240,3 +240,15 @@ def test_rate_limits_and_network_blips_are_retryable():
     assert not AuthError("x").retryable
     assert not InsufficientCreditsError("x").retryable
     assert not ResponseError("x").retryable
+
+
+def test_check_names_the_key_and_what_is_left():
+    client = build(FakeResponse(body={"data": {"label": "laptop", "usage": 1.5, "limit": 10.0}}))
+    info = client.check()
+    assert info.label == "laptop"
+    assert "8.50" in info.detail
+
+
+def test_check_calls_an_unlimited_key_unlimited():
+    client = build(FakeResponse(body={"data": {"label": "laptop", "usage": 1.5}}))
+    assert "unlimited" in client.check().detail

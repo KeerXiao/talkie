@@ -2,7 +2,7 @@ import pytest
 
 from talkie import providers
 from talkie.cli import check_key, main, parse_args
-from talkie.client import AuthError
+from talkie.client import AuthError, KeyInfo
 
 
 def test_defaults_to_the_hotkey_loop():
@@ -28,8 +28,8 @@ def test_check_key_reports_a_working_credential(monkeypatch, caplog):
     from talkie.config import Config
 
     class FakeClient:
-        def key_info(self):
-            return {"label": "laptop", "usage": 1.5, "limit": 10.0}
+        def check(self):
+            return KeyInfo("laptop", "remaining 8.50")
 
     monkeypatch.setattr("talkie.cli._client", lambda config: FakeClient())
     with caplog.at_level("INFO"):
@@ -42,7 +42,7 @@ def test_check_key_surfaces_a_bad_credential(monkeypatch, caplog):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-bad")
 
     class FakeClient:
-        def key_info(self):
+        def check(self):
             raise AuthError("Missing Authentication header", 401)
 
     monkeypatch.setattr("talkie.cli._client", lambda config: FakeClient())
@@ -57,3 +57,14 @@ def test_missing_api_key_exits_nonzero(monkeypatch, caplog):
         monkeypatch.delenv(provider.env_var, raising=False)
     assert main([]) == 1
     assert "OPENROUTER_API_KEY" in caplog.text
+
+
+def test_check_key_works_for_every_provider_the_factory_builds():
+    """`--check` used to call an OpenRouter-only method, so adding a provider
+    would have turned a bad key into a traceback."""
+    from talkie.client.factory import for_config
+    from talkie.config import Config
+
+    for provider in providers.PROVIDERS.values():
+        config = Config.from_env({provider.env_var: "sk-test"})
+        assert callable(for_config(config).check)

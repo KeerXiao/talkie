@@ -27,10 +27,30 @@ class Transcript:
         return bool(self.text)
 
 
+@dataclass(frozen=True)
+class KeyInfo:
+    """What a credential preflight managed to learn.
+
+    Deliberately thin. OpenRouter will name the key and quote a balance;
+    OpenAI will confirm the key works and say nothing else. Only `label` is
+    promised, so `--check` can print the same line for any provider.
+    """
+
+    label: str
+    detail: str = ""
+
+    def __str__(self) -> str:
+        return f"{self.label} · {self.detail}" if self.detail else self.label
+
+
 @runtime_checkable
 class TranscriptionClient(Protocol):
     """Swap in any backend that can turn a clip into a transcript."""
 
     def transcribe(self, clip: Clip) -> Transcript:
         """Return the transcript, or raise a ClientError."""
+        ...
+
+    def check(self) -> KeyInfo:
+        """Confirm the credential works, or raise a ClientError."""
         ...
