@@ -557,3 +557,32 @@ def test_a_one_shot_run_opens_no_session():
     assert app.stream_client is None
     dictate(app)
     assert app.recorder.on_frame is None
+
+
+def test_a_clip_finishes_against_the_client_it_started_with():
+    """A settings save switching to a streaming model nulls `client`. Reading
+    it on the worker instead of at release destroyed the clip in flight."""
+    gate = threading.Event()
+    client = FakeClient(block=gate)
+    app = build(client=client)
+    app._on_engage()
+    app._on_disengage()          # worker started, blocked in transcribe
+
+    live = replace(Config(api_key="sk"), provider="openai", model="gpt-live-transcribe")
+    assert live.streaming
+    app._new_stream = lambda cfg: object()
+    app.apply(live)              # self.client becomes None
+    assert app.client is None
+
+    gate.set()
+    time.sleep(0.4)
+    assert app.paster.pasted == ["hi"]
+
+
+def test_quitting_mid_dictation_does_not_race_the_release():
+    """close() and _on_disengage both take _session; only one may get it."""
+    app, stream = build_streaming()
+    app._on_engage()
+    app.close()
+    app._on_disengage()
+    assert stream.session.cancelled is True

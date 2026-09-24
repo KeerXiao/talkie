@@ -170,7 +170,8 @@ class Talkie:
         self.listener.stop()
         if self.recorder.active:
             self.recorder.stop()
-        session, self._session = self._session, None
+        with self._lock:
+            session, self._session = self._session, None
         if session is not None:
             session.cancel()
         log.info("bye")
@@ -190,8 +191,10 @@ class Talkie:
         # open() returns before the socket is up, so connecting overlaps the
         # first moments of speech instead of delaying the mic.
         self._streamed = self.stream_client is not None
-        self._session = self._open_session()
-        self.recorder.start(on_frame=self._session.feed if self._session else None)
+        session = self._open_session()
+        with self._lock:
+            self._session = session
+        self.recorder.start(on_frame=session.feed if session else None)
 
     def _open_session(self) -> StreamingSession | None:
         """A live session for this hold, or None when this run is one-shot.
@@ -217,8 +220,13 @@ class Talkie:
 
         clip = self.recorder.stop()
         self.sound.stop()
-        session, self._session = self._session, None
-        streamed, self._streamed = self._streamed, False
+        with self._lock:
+            session, self._session = self._session, None
+            streamed, self._streamed = self._streamed, False
+            # Captured here, not read on the worker: a settings save can null
+            # `client` (switching to a streaming model) between release and the
+            # request, and the clip must finish against what it started with.
+            client = self.client
         if clip.duration < self.config.min_seconds:
             log.info("discarded %.2fs tap", clip.duration)
             if session is not None:
@@ -229,7 +237,7 @@ class Talkie:
             return
         self._emit(TRANSCRIBING)
         threading.Thread(
-            target=self._handle, args=(clip, session, streamed), daemon=True
+            target=self._handle, args=(clip, session, streamed, client), daemon=True
         ).start()
 
     # -- worker ------------------------------------------------------------
@@ -239,10 +247,11 @@ class Talkie:
         clip: Clip,
         session: StreamingSession | None = None,
         streamed: bool = False,
+        client: TranscriptionClient | None = None,
     ) -> None:
         started_at = self._started_at
         try:
-            transcript = self._transcribe(clip, session, streamed)
+            transcript = self._transcribe(clip, session, streamed, client or self.client)
             if not transcript.text:
                 log.warning("empty transcript (%.1fs clip)", clip.duration)
                 self.sound.error()
@@ -277,7 +286,11 @@ class Talkie:
                 self._busy = False
 
     def _transcribe(
-        self, clip: Clip, session: StreamingSession | None, streamed: bool
+        self,
+        clip: Clip,
+        session: StreamingSession | None,
+        streamed: bool,
+        client: TranscriptionClient | None,
     ) -> Transcript:
         """The clip's one and only trip to a backend.
 
@@ -290,7 +303,9 @@ class Talkie:
             if session is None:
                 raise ClientError("could not open a live session for this clip")
             return session.finish()
-        return self.client.transcribe(clip)
+        if client is None:
+            raise ClientError("no transcription client for this clip")
+        return client.transcribe(clip)
 
     def _save(self, clip, started_at, transcript=None, error=None) -> None:
         """Persist the interaction, if this build keeps history."""

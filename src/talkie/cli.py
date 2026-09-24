@@ -76,7 +76,11 @@ def record_once(config: Config, seconds: float) -> None:
     clip = recorder.stop()
     log.info("captured %.1fs (%d bytes) → %s", clip.duration, len(clip.wav), config.model)
 
-    transcript = session.finish() if session else client.transcribe(clip)
+    try:
+        transcript = session.finish() if session else client.transcribe(clip)
+    finally:
+        if session is not None:
+            session.cancel()  # a no-op once finish() has returned
     log.info("%.1fs · usage %s", transcript.latency, transcript.usage or "{}")
     print(transcript.text)
 

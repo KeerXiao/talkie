@@ -378,7 +378,12 @@ class _Session:
         self._ready = threading.Event()   # the socket is configured
         self._done = threading.Event()    # the final transcript, or a failure
         self._flushed = threading.Event() # every queued block has been sent
+        # `_connection` is written by the reader once the handshake returns
+        # and read by the pump and by _close(), so it travels under the lock.
+        # `_closing` is how a close that arrives *during* the handshake is
+        # honoured: the reader checks it the moment the socket exists.
         self._connection: Any = None
+        self._closing = False
         self._error: ClientError | None = None
         self._cancelled = False
 
@@ -412,18 +417,33 @@ class _Session:
         self._audio.put(block)
 
     def finish(self) -> Transcript:
-        """Commit what was said and wait for the final text."""
+        """Commit what was said and wait for the final text.
+
+        Both waits share one deadline. Budgeting them separately meant a hung
+        connect cost `connect_timeout` *plus* `final_timeout` — 40 s with the
+        shipped defaults — and `Talkie` stays busy for all of it, so the hotkey
+        would be dead that whole time.
+        """
         self._releasing = time.monotonic()
+        deadline = self._releasing + self._final_timeout
         self._audio.put(_EOF)
         # The pump commits once the queue is empty; without that wait the
         # commit could reach the server before the last block of speech.
-        self._flushed.wait(self._final_timeout)
-        if not self._done.wait(self._final_timeout):
+        self._flushed.wait(self._remaining(deadline))
+        if not self._done.wait(self._remaining(deadline)):
             self._fail(NetworkError("the realtime session did not finish in time"))
+        # Set even on the timeout path: it is what stops the reader waiting for
+        # an event that is never coming.
+        self._done.set()
         self._close()
 
         if self._error is not None:
             raise self._error
+        if self._cancelled:
+            # cancel() landed while this was waiting — Talkie.close() during a
+            # dictation does exactly that. Returning the empty transcript would
+            # tell the user they said nothing.
+            raise ClientError("the live session was abandoned")
         return Transcript(
             text=self.text,
             model=self._model,
@@ -436,11 +456,15 @@ class _Session:
         )
 
     def cancel(self) -> None:
-        """Abandon the session. Nothing is waiting on the result."""
+        """Abandon the session. Safe to call twice, and after finish()."""
         self._cancelled = True
         self._audio.put(_EOF)
         self._done.set()
         self._close()
+
+    @staticmethod
+    def _remaining(deadline: float) -> float:
+        return max(0.0, deadline - time.monotonic())
 
     # -- what has been heard so far ----------------------------------------
 
@@ -462,6 +486,13 @@ class _Session:
         if not self._ready.wait(self._connect_timeout):
             self._flushed.set()
             return
+        # One snapshot, so a concurrent _close() cannot turn a send into an
+        # AttributeError that reaches the user as the failure message.
+        with self._lock:
+            connection = self._connection
+        if connection is None:
+            self._flushed.set()
+            return
         try:
             while True:
                 block = self._audio.get()
@@ -469,11 +500,11 @@ class _Session:
                     break
                 chunk = self._resample(block)
                 if chunk.size:
-                    self._connection.input_audio_buffer.append(
+                    connection.input_audio_buffer.append(
                         audio=base64.b64encode(chunk.tobytes()).decode()
                     )
             if not self._cancelled and self._samples:
-                self._connection.input_audio_buffer.commit()
+                connection.input_audio_buffer.commit()
             elif not self._samples:
                 # Committing an empty buffer is an error event, and a clip this
                 # short is discarded upstream anyway.
@@ -484,10 +515,28 @@ class _Session:
             self._flushed.set()
 
     def _read(self) -> None:
-        """Own the connection: configure it, then dispatch events until it ends."""
+        """Own the connection: configure it, then dispatch events until it ends.
+
+        `connect()` returns a context manager whose `__enter__` performs the
+        whole WebSocket handshake, so everything before the `with` body is time
+        in which a cancel can arrive with no socket yet to close. That is the
+        case `_closing` exists for: a tap shorter than `min_seconds` cancels
+        well inside a handshake, and without this check the socket and this
+        thread would both outlive the dictation.
+
+        The SDK's reconnect is deliberately left off — `connect()` defaults
+        `on_reconnecting` to None, so a dropped socket ends the iteration
+        instead of silently opening a second one with default (VAD-on,
+        wrong-format) session config.
+        """
         try:
             with self._connect() as connection:
-                self._connection = connection
+                with self._lock:
+                    abandoned = self._closing
+                    if not abandoned:
+                        self._connection = connection
+                if abandoned:
+                    return  # __exit__ closes the socket on the way out
                 connection.session.update(session=self._config)
                 self._ready.set()
                 for event in connection:
@@ -555,8 +604,11 @@ class _Session:
             self._error = error
 
     def _close(self) -> None:
-        connection = self._connection
-        self._connection = None
+        """Close the socket, or tell the reader to when it finally has one."""
+        with self._lock:
+            self._closing = True
+            connection = self._connection
+            self._connection = None
         if connection is None:
             return
         try:
