@@ -8,6 +8,10 @@ Precedence, lowest to highest:
 
     dataclass defaults  ->  environment  ->  settings.json
 
+Provider is part of that, and it carries the key with it: switching provider
+re-points `Config.api_key` from the keys already read out of the environment,
+so the swap needs no restart and still writes no credential to disk.
+
 The UI is the user's most recent explicit choice, so it wins over a shell
 export; the environment still seeds a first run, before any file exists.
 
@@ -29,6 +33,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from talkie import providers
 from talkie.config import DEFAULT_HISTORY_KEEP, DEFAULT_MODEL, Config
 
 log = logging.getLogger(__name__)
@@ -58,9 +63,12 @@ LANGUAGES: list[dict[str, str]] = [
     {"code": "ar", "label": "Arabic"},
 ]
 
-# Suggestions only; the field is free text, because OpenRouter's catalogue
-# moves faster than this list can.
-MODELS: list[str] = [DEFAULT_MODEL, "openai/whisper-large-v3-turbo"]
+# Suggestions only; the field stays free text, because both catalogues move
+# faster than this project can. The list itself comes from providers.py — it is
+# the one table config, the factory, this page and the history window all read,
+# and a second copy here is exactly the drift it exists to prevent.
+def models_for(provider_id: str) -> list[str]:
+    return [model.id for model in providers.get(provider_id).models]
 
 # A BCP-47-ish subtag: 'en', 'zh', 'zh-hans', 'pt-br'.
 LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})?$")
@@ -82,7 +90,11 @@ class Settings:
     """Everything the settings page may change."""
 
     language: str | None = "en"  # None means auto-detect
+    provider: str = providers.DEFAULT_PROVIDER
     model: str = DEFAULT_MODEL
+    # The preference. What actually runs is Config.running_mode, because a
+    # model that offers only one way to be driven overrides this.
+    mode: str = providers.DEFAULT_MODE
     sound_volume: float = 1.0
     history_keep: int = DEFAULT_HISTORY_KEEP
 
@@ -93,17 +105,34 @@ class Settings:
         """The environment-derived baseline, before any file is layered on."""
         return cls(
             language=config.language,
+            provider=config.provider,
             model=config.model,
+            mode=config.mode,
             sound_volume=config.sound_volume,
             history_keep=config.history_keep,
         )
 
     def apply_to(self, config: Config) -> Config:
-        """A copy of `config` carrying these choices. Never touches the key."""
+        """A copy of `config` carrying these choices.
+
+        The key moves only when the provider does, re-pointed from the keys
+        already resolved out of the environment — which is how the swap needs
+        no restart and still writes no credential to disk. Staying on the same
+        provider leaves `api_key` exactly as it was, so this never has to know
+        where that key came from.
+
+        A provider whose variable was never exported gets an empty key here;
+        the factory refuses it, rather than letting a blank credential reach
+        the network as a 401 at the next dictation.
+        """
+        same_provider = self.provider == config.provider
         return replace(
             config,
             language=self.language,
+            provider=self.provider,
+            api_key=config.api_key if same_provider else config.for_provider(self.provider),
             model=self.model,
+            mode=self.mode,
             sound_volume=self.sound_volume,
             history_keep=self.history_keep,
         )
@@ -111,10 +140,42 @@ class Settings:
     def to_json(self) -> dict:
         return {
             "language": self.language or AUTO,
+            "provider": self.provider,
             "model": self.model,
+            "mode": self.mode,
             "sound_volume": self.sound_volume,
             "history_keep": self.history_keep,
         }
+
+    def reconciled(self) -> Settings:
+        """Drop a model that the table says belongs to a different provider.
+
+        The field is free text on purpose, so an id this version has never
+        heard of is kept — both catalogues move faster than `providers.py`.
+        An id the table says belongs to *another* provider is not that: it is
+        unambiguously wrong, and left alone it fails on the first clip with a
+        404 rather than here. A settings file written before provider was a
+        setting is exactly how one gets stranded.
+        """
+        if providers.model(self.provider, self.model) is not None:
+            return self
+        owner = next(
+            (p for p in providers.PROVIDERS.values() if p.model(self.model)), None
+        )
+        if owner is None or owner.id == self.provider:
+            return self
+        fallback = providers.default_model(self.provider)
+        log.warning(
+            "%s belongs to %s, not %s — using %s instead",
+            self.model, owner.label, self.provider, fallback,
+        )
+        return replace(self, model=fallback)
+
+    @property
+    def running_mode(self) -> str:
+        """What a clip would actually run as, for a page that must grey out
+        the choice the model cannot honour."""
+        return providers.resolve_mode(self.provider, self.model, self.mode)
 
     # -- validation --------------------------------------------------------
 
@@ -131,7 +192,7 @@ class Settings:
         for field, coerce in COERCE.items():
             if field in patch:
                 changes[field] = coerce(patch[field])
-        return replace(self, **changes)
+        return replace(self, **changes).reconciled()
 
     def tolerant_merge(self, patch: dict) -> Settings:
         """Like `merge`, but a bad field is logged and skipped, not fatal.
@@ -139,15 +200,18 @@ class Settings:
         For reading the file: one hand-edited typo must not throw away the
         other three settings, nor stop the app from starting.
         """
-        merged = self
+        clean = {}
         for field, value in (patch or {}).items():
             if field not in COERCE:
                 continue
             try:
-                merged = merged.merge({field: value})
+                clean[field] = COERCE[field](value)
             except SettingsError as exc:
                 log.warning("ignoring %s in settings: %s", field, exc)
-        return merged
+        # Applied in one go, not field by field: reconciling after each would
+        # judge the model against a provider that is about to change, and a
+        # file listing model before provider would lose the model.
+        return replace(self, **clean).reconciled()
 
 
 def _language(value) -> str | None:
@@ -172,6 +236,26 @@ def _model(value) -> str:
     if len(model) > 200 or any(c.isspace() for c in model):
         raise SettingsError("model", f"{value!r} is not a model id")
     return model
+
+
+def _provider(value) -> str:
+    if not isinstance(value, str):
+        raise SettingsError("provider", "provider must be text")
+    provider_id = value.strip().lower()
+    if not providers.known(provider_id):
+        names = ", ".join(sorted(providers.PROVIDERS))
+        raise SettingsError("provider", f"provider must be one of: {names}")
+    return provider_id
+
+
+def _mode(value) -> str:
+    if not isinstance(value, str):
+        raise SettingsError("mode", "mode must be text")
+    mode = value.strip().lower()
+    if mode not in providers.MODES:
+        names = ", ".join(providers.MODES)
+        raise SettingsError("mode", f"mode must be one of: {names}")
+    return mode
 
 
 def _sound_volume(value) -> float:
@@ -200,7 +284,9 @@ def _history_keep(value) -> int:
 
 COERCE = {
     "language": _language,
+    "provider": _provider,
     "model": _model,
+    "mode": _mode,
     "sound_volume": _sound_volume,
     "history_keep": _history_keep,
 }
@@ -252,5 +338,5 @@ def resolve(config: Config, store: SettingsStore | None = None) -> tuple[Config,
     the terminal and windowed builds always agree on what is configured.
     """
     store = store or SettingsStore()
-    settings = store.load(Settings.from_config(config))
+    settings = store.load(Settings.from_config(config)).reconciled()
     return settings.apply_to(config), settings

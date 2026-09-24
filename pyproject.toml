@@ -1,7 +1,7 @@
 [project]
 name = "talkie"
 version = "0.1.0"
-description = "Push-to-talk dictation through OpenRouter"
+description = "Push-to-talk dictation through OpenRouter or OpenAI"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]

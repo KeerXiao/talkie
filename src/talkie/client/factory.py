@@ -18,6 +18,19 @@ from talkie.client.openrouter import OpenRouterClient
 from talkie.config import Config, ConfigError
 
 
+def _key(config: Config) -> str:
+    """The credential, or a message naming the variable that is missing.
+
+    Reachable from the settings page, which offers every provider whether or
+    not its key was exported — so choosing one says what to set instead of
+    failing at the next dictation with a 401 (SPEC §6.9 #8).
+    """
+    if not config.api_key:
+        provider = providers.get(config.provider)
+        raise ConfigError(f"{provider.label} needs {provider.env_var} — it is not set")
+    return config.api_key
+
+
 def for_config(config: Config) -> TranscriptionClient:
     """A one-shot client bound to one provider, model and language.
 
@@ -35,14 +48,14 @@ def for_config(config: Config) -> TranscriptionClient:
         )
     if config.provider == providers.OPENROUTER:
         return OpenRouterClient(
-            api_key=config.api_key,
+            api_key=_key(config),
             model=config.model,
             language=config.language,
             timeout=config.request_timeout,
         )
     if config.provider == providers.OPENAI:
         return OpenAIClient(
-            api_key=config.api_key,
+            api_key=_key(config),
             model=config.model,
             language=config.language,
             timeout=config.request_timeout,
@@ -71,7 +84,7 @@ def streaming_for_config(config: Config) -> StreamingClient:
         )
     if config.provider == providers.OPENAI:
         return OpenAIStreamingClient(
-            api_key=config.api_key,
+            api_key=_key(config),
             model=config.model,
             language=config.language,
             sample_rate=config.sample_rate,

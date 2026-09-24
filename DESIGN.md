@@ -349,6 +349,8 @@ A write error is logged and swallowed; `record()` never raises into the dictatio
 ```
 Config.from_env()  ->  Settings.from_config()  ->  store.load()  ->  settings.apply_to(config)
    the environment        the editable slice        the saved file      what everything is built from
+   every provider's                                                    provider, model, mode,
+   key, resolved once                                                  and the key that goes with them
 ```
 
 `resolve()` is that whole pipeline, and both builds call it from `cli.py`, so `talkie` and `talkie --ui` cannot drift apart about what is configured.
@@ -357,8 +359,25 @@ Config.from_env()  ->  Settings.from_config()  ->  store.load()  ->  settings.ap
 The UI is the user's most recent explicit choice; a shell export made months ago should not silently undo a dropdown touched a second ago.
 The environment still seeds a first run, which is what keeps `TALKIE_MODEL=… talkie` useful for a one-off.
 
-**The API key is not a setting.**
-It never enters `Settings`, so it can never be written to `settings.json` — and because `merge` ignores keys it does not know, a patch arriving from JavaScript cannot introduce one either.
+**The API key is not a setting, but the provider is.**
+The key never enters `Settings`, so it can never be written to `settings.json` — and because `merge` ignores keys it does not know, a patch arriving from JavaScript cannot introduce one either.
+Provider is a setting, and switching it re-points `Config.api_key` from the keys `Config.from_env` already read out of the environment.
+That is what lets the swap happen with no restart and still no credential on disk.
+The key moves only when the provider does, so a `Config` built by hand — every test, and any future caller — keeps whatever key it was given.
+
+**A saved model that belongs to another provider is dropped at load.**
+The model field is free text on purpose — both catalogues move faster than `providers.py`, so an id this version has never heard of is kept and assumed one-shot (§2.3).
+An id the table says belongs to a *different* provider is not the same thing: it is unambiguously wrong, and left alone it fails with a 404 on the first clip rather than at startup.
+A `settings.json` written before provider was a setting is exactly how one gets stranded, so `Settings.reconciled()` runs on load and after every merge.
+It runs once over the whole patch, not per field: judging the model against a provider that is about to change would discard the model whenever a file happened to list it first.
+
+**A provider with no key fails at the factory, not at the next dictation.**
+Every provider is offered in the page whether or not its variable was exported, because hiding one would leave the user with nothing to act on.
+Choosing one you have no key for produces an empty `api_key`, and `client/factory.py` refuses it by name (SPEC §6.9 #8) — the alternative is a blank credential reaching the network and coming back a 401 several seconds into the next dictation.
+
+**Applying comes before persisting.**
+`Api.update_settings` applies the change to the running app first and only writes the file if that succeeded, rolling back to the previous `Settings` if it did not.
+The other order is worse in exactly the case that matters: a provider with no key would be reported as saved, and would then break the next start from a file the user never sees.
 
 **Validation lives with the type, not the page.**
 `Settings.merge` coerces and bounds every field and raises `SettingsError` carrying the offending field name; the page renders the message beside that control.
@@ -371,7 +390,10 @@ A save is atomic, the same temp-and-`os.replace` as history, and reports failure
 **Applying is live, and one-directional.**
 `Talkie.apply(config)` rebinds the client, the cue volume and the history cap.
 The client is rebuilt rather than mutated, because a client is bound to one model and language (§2) — `client_factory` is the seam that lets a test observe it.
-It runs on the bridge thread while a dictation may be in flight, which is safe only because it does nothing but rebind: a clip already inside `transcribe()` finishes against the client it started with, so its history row names the model that actually did the work.
+Exactly one of the one-shot and streaming clients exists at a time, chosen by `Config.running_mode`; holding both would make a cross-mode fallback possible, and there deliberately is none (§2.4).
+Both are built before anything is rebound, so a config the factory rejects leaves the app running as it was rather than half-applied.
+It runs on the bridge thread while a dictation may be in flight, which is safe only because it does nothing but rebind — and because the worker captures its client at the moment the key comes up rather than reading `self.client` later.
+A clip already in flight therefore finishes against the client it started with, so its history row names the model that actually did the work.
 
 **The hotkey is not there.**
 Every other setting is a value read at the moment it is used; the hotkey is held by a running pynput listener, so changing it means stopping that listener and starting another, and getting the engaged/pressed state right across the swap.
