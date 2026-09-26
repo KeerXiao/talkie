@@ -22,7 +22,7 @@ import webview
 from AppKit import NSApplication
 from PyObjCTools import AppHelper
 
-from talkie.app import ERROR, IDLE, RECORDING, TRANSCRIBING, Talkie
+from talkie.app import EMPTY, ERROR, IDLE, RECORDING, TRANSCRIBING, Talkie
 from talkie.config import Config
 from talkie.history import History, Interaction
 from talkie.permissions import ACCESSIBILITY_HINT, accessibility_trusted
@@ -30,7 +30,7 @@ from talkie.settings import Settings, SettingsStore
 from talkie.ui import branding, dock
 from talkie.ui.api import Api
 from talkie.ui.menubar import MenuBar
-from talkie.ui.overlay import Overlay
+from talkie.ui.overlay import DONE, WAITING, Overlay
 from talkie.ui.window import HistoryWindow
 
 log = logging.getLogger(__name__)
@@ -97,10 +97,10 @@ class TalkieApp:
         if state == RECORDING:
             self.overlay.show()
         elif state == TRANSCRIBING and not self.config.streaming:
-            # One-shot has nothing to show yet, but the strip staying up says
-            # the hotkey was heard — the feature is not conditional on paying
-            # for streaming (SPEC §6.4).
-            self.overlay.show(state="working")
+            # A one-shot model sends nothing until the request returns, so the
+            # wait is named rather than hinted at. On OpenRouter this is the
+            # only state the user ever sees before the transcript lands.
+            self.overlay.show(state=WAITING)
         elif state in (IDLE, ERROR):
             # A tap too short to transcribe writes no history row, so this is
             # the only thing that takes the strip down again. A clip that did
@@ -117,9 +117,17 @@ class TalkieApp:
             self.menubar.set_stats(self.api.stats())
         if self.overlay is not None:
             # The history row is the one place that knows how it ended, for
-            # both modes and for a failure.
-            self.overlay.finish(entry.text or (entry.error or ""))
+            # both modes and for a failure. A clip with no speech in it is not
+            # a failure worth naming — the strip says nothing was heard.
+            self.overlay.finish(entry.text or self._outcome(entry))
         self.window.refresh()
+
+    @staticmethod
+    def _outcome(entry: Interaction) -> str:
+        """What to show for a clip that produced no text."""
+        if entry.ok or entry.error == EMPTY:
+            return ""  # the overlay's own "Nothing heard"
+        return entry.error or ""
 
     def _on_settings(self, settings: Settings) -> None:
         """The settings page saved. Runs on the bridge thread, not the main one.

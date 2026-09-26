@@ -93,7 +93,8 @@ Clicking it shows your hotkey, your model and mode, and today's running total �
 While you hold the key, a strip appears near the bottom of the screen with the transcript in it.
 
 On a streaming model the words arrive as you speak them, a beat behind your voice, so a misheard word is obvious before you have finished the sentence.
-On a one-shot model the strip shows the finished transcript when it lands — later, but still without going to look for it.
+On a one-shot model — which is every OpenRouter model — nothing comes back until the request returns, so the strip says `Transcribing…` and then shows the finished transcript.
+A clip the model heard nothing in says `Nothing heard`, and a clip that failed shows why.
 Either way it fades a moment after the paste.
 
 It never takes focus and never accepts a click.
@@ -205,7 +206,7 @@ Switching is the Model field in the settings tab, or `export TALKIE_MODEL=...` �
 ## Development
 
 ```sh
-make test      # 374 tests — no microphone, network, or permissions needed
+make test      # 377 tests — no microphone, network, or permissions needed
 ```
 
 Tests live **beside the code they test**, Go-style: `audio.py` next to `audio_test.py`.

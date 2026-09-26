@@ -261,10 +261,17 @@ None of that is observable from a unit test — the panel has to be on screen wi
 | State | Strip |
 |---|---|
 | recording | `Listening…`, then partials as they arrive |
-| transcribing, one-shot | `…` — nothing has come back yet, but the hotkey was heard |
+| transcribing, one-shot | `Transcribing…` — the wait is named, not hinted at |
 | transcribing, streamed | unchanged; the last partial is still the best thing to show |
-| a clip finished or failed | the transcript, or the error, then fades after 1.6 s |
+| a clip that produced text | the transcript, then fades after 1.6 s |
+| a clip with no speech in it | `Nothing heard` |
+| a clip that failed | the error, then fades |
 | a tap too short to transcribe | taken down — it writes no history row, so nothing else would |
+
+**The placeholders name the gap they are filling.**
+A blank strip reads as a window that failed to draw, and an ellipsis that never grows reads as a stream that died — which on a one-shot model is the only thing the user would ever see, because no word arrives before the request returns.
+So the waiting state says `Transcribing…` and a clip the model heard nothing in says `Nothing heard`, rather than showing the `empty transcript` wording the history row uses.
+That string is the right level of detail in a list of past attempts and the wrong one on screen: there is nothing for the user to act on.
 
 **Why not pywebview.** A second WebView window would mean reaching into its `NSWindow` to set all of the above anyway, plus a second page to build and style.
 The menu bar is already ~40 lines of PyObjC against `NSStatusItem` (§4); a caption strip is an `NSTextField` in a blurred panel and costs less than the HTML would.

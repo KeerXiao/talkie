@@ -27,6 +27,10 @@ RECORDING = "recording"
 TRANSCRIBING = "transcribing"
 ERROR = "error"
 
+# The failure a clip with no speech in it records. Named because the UI tells
+# it apart from a real failure: there is nothing for the user to act on.
+EMPTY = "empty transcript"
+
 
 
 
@@ -255,7 +259,7 @@ class Talkie:
             if not transcript.text:
                 log.warning("empty transcript (%.1fs clip)", clip.duration)
                 self.sound.error()
-                self._save(clip, started_at, error="empty transcript")
+                self._save(clip, started_at, error=EMPTY)
                 self._emit(ERROR)
                 return
             self.paster.paste(transcript.text, before=self.listener.wait_until_released)
