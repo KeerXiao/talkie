@@ -30,8 +30,18 @@ packages = ["src/talkie"]
 exclude = ["**/*_test.py"]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
 
 [tool.pytest.ini_options]
 testpaths = ["src"]
 python_files = ["*_test.py"]
+# A hang is worse than a failure here: the suite exercises a hotkey loop, a
+# microphone and WebSockets, so a test that blocks leaves a process holding the
+# real hotkey. Two of those once survived for two days. The slowest honest test
+# is ~5s, so 60 is generous.
+#
+# `thread` rather than the default signal method: signals do not land while the
+# main thread sits in a native call, which is exactly how the worst hangs look
+# (see DESIGN 8 on Cocoa and Ctrl+C).
+timeout = 60
+timeout_method = "thread"
