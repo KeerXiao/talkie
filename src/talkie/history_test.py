@@ -142,3 +142,31 @@ def test_roundtrip_through_json_preserves_the_entry():
         cost=0.000083,
     )
     assert Interaction.from_json(entry.to_json()) == entry
+
+
+def test_rewrite_replaces_the_outcome_and_keeps_the_identity(tmp_path):
+    """A retry is the same dictation, so it keeps its id, time and audio."""
+    history = History(root=tmp_path)
+    entry = history.record(Clip(b"RIFF", 2.0), error="upstream down")
+
+    updated = history.rewrite(
+        entry.id, transcript=Transcript(text="got it", model="m2", latency=0.3)
+    )
+
+    assert updated.id == entry.id
+    assert updated.started_at == entry.started_at
+    assert updated.duration == 2.0
+    assert (updated.text, updated.model, updated.error) == ("got it", "m2", None)
+    assert history.audio(entry.id) == b"RIFF"
+    assert len(history.list()) == 1
+
+
+def test_rewrite_can_record_a_second_failure(tmp_path):
+    history = History(root=tmp_path)
+    entry = history.record(Clip(b"RIFF", 1.0), error="first")
+    updated = history.rewrite(entry.id, error="still down")
+    assert updated.error == "still down" and not updated.ok
+
+
+def test_rewriting_a_clip_that_is_gone_is_not_an_error(tmp_path):
+    assert History(root=tmp_path).rewrite("nope", error="x") is None

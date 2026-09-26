@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from talkie.audio import Clip, Recorder
+from talkie.audio import Clip, Recorder, blocks, samples
 from talkie.client import ClientError, StreamingClient, TranscriptionClient
 from talkie.client.base import StreamingSession, Transcript
 from talkie.client.factory import for_config, streaming_for_config
@@ -306,6 +306,34 @@ class Talkie:
         if client is None:
             raise ClientError("no transcription client for this clip")
         return client.transcribe(clip)
+
+    # -- retry -------------------------------------------------------------
+
+    def transcribe_again(self, clip: Clip) -> Transcript:
+        """Send an already-recorded clip once more.
+
+        For a failed dictation whose audio history kept: the user should not
+        have to say it twice. It goes through whatever is configured *now*,
+        because the usual reason a clip failed is that something was wrong with
+        the provider, and the point of retrying is that it has since changed.
+
+        Nothing is pasted. The history window has focus when this is called, so
+        a paste would land in talkie itself — the same reason the overlay never
+        takes focus (DESIGN 4.1).
+        """
+        if self.stream_client is None:
+            return self.client.transcribe(clip)
+        # A stream-only model has no file endpoint, so the stored clip is fed
+        # through a session exactly as the microphone would have fed it — at
+        # its own recorded rate, not the mic's current one.
+        frames, rate = samples(clip.wav)
+        session = self.stream_client.open(sample_rate=rate)
+        try:
+            for block in blocks(frames):
+                session.feed(block)
+            return session.finish()
+        finally:
+            session.cancel()  # a no-op once finish() has returned
 
     def _save(self, clip, started_at, transcript=None, error=None) -> None:
         """Persist the interaction, if this build keeps history."""

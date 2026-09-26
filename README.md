@@ -102,6 +102,8 @@ That is not a detail: the transcript is about to be pasted into whatever app is 
 The window lists every past dictation, newest first, grouped by day.
 Each row can be copied, replayed, or deleted, and there's a search box over the transcripts.
 **Failed clips are kept too**, with the error in place of the transcript and their audio still playable — so when something goes wrong you can hear exactly what the model was sent.
+They also get a **Retry** button: the audio is still on disk, so a clip that failed is sent again rather than said again, through whatever provider and model you have configured now.
+The transcript replaces the error in the same row, and you copy it from there — nothing is pasted, because the window you are looking at is talkie.
 
 History lives in `~/.talkie/history/` as a `.wav` and `.json` pair per dictation, capped at the 50 most recent by default.
 Nothing is uploaded anywhere except the transcription request itself.
@@ -203,7 +205,7 @@ Switching is the Model field in the settings tab, or `export TALKIE_MODEL=...` �
 ## Development
 
 ```sh
-make test      # 351 tests — no microphone, network, or permissions needed
+make test      # 374 tests — no microphone, network, or permissions needed
 ```
 
 Tests live **beside the code they test**, Go-style: `audio.py` next to `audio_test.py`.

@@ -85,9 +85,17 @@ class StreamingSession(Protocol):
 class StreamingClient(Protocol):
     """A backend that can transcribe while the audio is still arriving."""
 
-    def open(self, on_partial: Callable[[str], None] | None = None) -> StreamingSession:
+    def open(
+        self,
+        on_partial: Callable[[str], None] | None = None,
+        sample_rate: int | None = None,
+    ) -> StreamingSession:
         """Start a session. Returns before the socket is up, so the mic can
-        open into the connect rather than after it."""
+        open into the connect rather than after it.
+
+        `sample_rate` overrides the client's own, for audio that is not coming
+        from the microphone — a stored clip being sent again.
+        """
         ...
 
     def check(self) -> KeyInfo:

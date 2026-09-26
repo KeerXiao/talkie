@@ -7,6 +7,7 @@ before its JSON, so a visible entry always has playable audio behind it.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -115,6 +116,36 @@ class History:
         except Exception:
             log.exception("could not write history (continuing anyway)")
             return None
+
+    def rewrite(
+        self, clip_id: str, transcript: Transcript | None = None, error: str | None = None
+    ) -> Interaction | None:
+        """Replace one row's outcome, keeping its id, timestamp and audio.
+
+        A retry is the same dictation, not a new one: forking it into a second
+        row would double the day's clip count and leave the failure sitting
+        above the transcript that replaced it.
+        """
+        entry = self.get(clip_id)
+        if entry is None:
+            return None
+        updated = dataclasses.replace(
+            entry,
+            model=transcript.model if transcript else entry.model,
+            text=transcript.text if transcript else "",
+            latency=transcript.latency if transcript else None,
+            cost=transcript.cost if transcript else None,
+            error=error,
+        )
+        try:
+            self._atomic_write(
+                self.root / f"{updated.id}.json",
+                json.dumps(updated.to_json(), indent=2).encode(),
+            )
+        except Exception:
+            log.exception("could not rewrite history entry %s", clip_id)
+            return None
+        return updated
 
     def _free_id(self, when: datetime) -> str:
         base = when.strftime(STAMP)

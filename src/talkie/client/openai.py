@@ -298,7 +298,15 @@ class OpenAIStreamingClient:
         self.final_timeout = final_timeout
         self._client = client or _sdk().OpenAI(api_key=api_key)
 
-    def open(self, on_partial: Callable[[str], None] | None = None) -> _Session:
+    def open(
+        self,
+        on_partial: Callable[[str], None] | None = None,
+        sample_rate: int | None = None,
+    ) -> _Session:
+        """`sample_rate` overrides the configured one for this session only —
+        a stored clip carries its own rate in its header, and resampling from
+        the wrong one would send the model slowed-down or hurried speech."""
+        rate = sample_rate or self.sample_rate
         session = _Session(
             # `intent=transcription`, not `model=`: the query parameter names a
             # realtime *session* model, and a transcription session has none —
@@ -308,9 +316,9 @@ class OpenAIStreamingClient:
                 extra_query={"intent": "transcription"}
             ),
             config=self.session_config(),
-            resample=_Resampler(self.sample_rate),
+            resample=_Resampler(rate),
             model=self.model,
-            sample_rate=self.sample_rate,
+            sample_rate=rate,
             on_partial=on_partial,
             connect_timeout=self.connect_timeout,
             final_timeout=self.final_timeout,

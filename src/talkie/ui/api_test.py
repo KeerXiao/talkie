@@ -304,3 +304,126 @@ def test_the_form_reports_what_will_actually_run(settings_api):
     assert result["settings"]["mode"] == "batch"
     assert result["runningMode"] == "stream"
     assert settings_api.get_settings()["runningMode"] == "stream"
+
+
+# -- retry (M3 follow-up) --------------------------------------------------
+
+
+def retry_api(tmp_path, transcribe=None, **kwargs):
+    from talkie.client import Transcript
+
+    def default(clip):
+        return Transcript(text="second time lucky", model="m2", latency=0.4,
+                          usage={"cost": 0.002})
+
+    return Api(
+        History(root=tmp_path / "h"),
+        clipboard=FakeClipboard(),
+        store=SettingsStore(tmp_path / "settings.json"),
+        on_retry=transcribe or default,
+        **kwargs,
+    )
+
+
+def failed_clip(api, duration=1.0, wav=b"RIFFfake"):
+    from talkie.audio import Clip
+
+    return api.history.record(Clip(wav, duration), error="upstream down")
+
+
+def test_a_retry_replaces_the_row_it_retried(tmp_path):
+    """A second row would double the day's clip count and leave the failure
+    sitting above the transcript that replaced it."""
+    api = retry_api(tmp_path)
+    entry = failed_clip(api)
+
+    result = api.retry(entry.id)
+
+    assert result["ok"] is True
+    assert result["row"]["text"] == "second time lucky"
+    assert result["row"]["id"] == entry.id
+    assert len(api.history.list()) == 1
+    assert api.history.get(entry.id).error is None
+
+
+def test_a_retry_names_the_model_that_actually_worked(tmp_path):
+    api = retry_api(tmp_path)
+    entry = failed_clip(api)
+    api.retry(entry.id)
+    row = api.history.get(entry.id)
+    assert row.model == "m2" and row.cost == 0.002
+
+
+def test_the_audio_survives_a_retry_so_it_can_be_retried_again(tmp_path):
+    api = retry_api(tmp_path)
+    entry = failed_clip(api)
+    api.retry(entry.id)
+    assert api.history.audio(entry.id) == b"RIFFfake"
+
+
+def test_a_retry_that_fails_again_says_so_and_keeps_the_row_failed(tmp_path):
+    from talkie.client import ServerError
+
+    def explode(clip):
+        raise ServerError("still down", 503)
+
+    api = retry_api(tmp_path, transcribe=explode)
+    entry = failed_clip(api)
+
+    result = api.retry(entry.id)
+
+    assert result["ok"] is False
+    assert "still down" in result["error"]
+    assert api.history.get(entry.id).error is not None
+    assert api.history.audio(entry.id) is not None  # still retryable
+
+
+def test_an_empty_second_transcript_is_a_failure_not_a_blank_success(tmp_path):
+    from talkie.client import Transcript
+
+    api = retry_api(tmp_path, transcribe=lambda clip: Transcript("", "m2", 0.1))
+    entry = failed_clip(api)
+
+    result = api.retry(entry.id)
+
+    assert result["ok"] is False
+    assert api.history.get(entry.id).error == "empty transcript"
+
+
+def test_an_unexpected_failure_does_not_escape_the_bridge(tmp_path):
+    """An exception crossing pywebview arrives in JavaScript opaque."""
+    def explode(clip):
+        raise RuntimeError("boom")
+
+    api = retry_api(tmp_path, transcribe=explode)
+    entry = failed_clip(api)
+    assert api.retry(entry.id)["ok"] is False
+
+
+def test_retrying_a_clip_whose_audio_is_gone_says_why(tmp_path):
+    api = retry_api(tmp_path)
+    from talkie.audio import Clip
+
+    entry = api.history.record(Clip(b"", 0.0), error="no audio")
+    result = api.retry(entry.id)
+    assert result["ok"] is False
+    assert "audio" in result["error"]
+
+
+def test_retrying_an_unknown_clip_is_not_an_error_page(tmp_path):
+    assert retry_api(tmp_path).retry("nope")["ok"] is False
+
+
+def test_the_clip_handed_over_carries_the_recorded_duration(tmp_path):
+    seen = []
+
+    def watch(clip):
+        from talkie.client import Transcript
+        seen.append(clip)
+        return Transcript("ok", "m2", 0.1)
+
+    api = retry_api(tmp_path, transcribe=watch)
+    failed_clip(api, duration=4.25)
+    api.retry(api.history.list()[0].id)
+    assert seen[0].duration == 4.25
+    assert seen[0].wav == b"RIFFfake"
