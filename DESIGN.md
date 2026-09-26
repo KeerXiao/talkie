@@ -171,14 +171,21 @@ A Python audio library (`playsound`, `pygame`, `simpleaudio`) or PyObjC/CoreAudi
 - **Cues are fire-and-forget on a throwaway thread.**
 `afplay` lives for the duration of the sound (~0.6 s), and the cue is triggered from the chord callback, so a blocking call there would delay the microphone opening by that much and clip the first word.
 The thread also reaps the child, so no zombies accumulate over a long session.
-- **Cue ordering:** the start cue fires *before* the mic opens and the stop cue *after* it closes.
-This minimises but does not eliminate bleed into the recording — `afplay` needs ~50 ms to make its first sound, by which time the stream is live, so on laptop speakers the Tink lands in the clip.
+- **Cue ordering:** the start cue fires *before* the mic opens, so it bleeds into the recording as little as possible.
+That minimises but does not eliminate it — `afplay` needs ~50 ms to make its first sound, by which time the stream is live, so on laptop speakers the Tink lands in the clip.
 Harmless for the STT models in practice; headphones or a lower volume remove it.
+- **One cue per dictation, and the outcome picks it.**
+The release used to cue immediately, so a clip that then failed cued twice about half a second apart.
+On a sub-second tap — which is where this happens most, because an accidental tap comes back empty almost at once — the two arrived as a stutter rather than as two sounds, and only the second one carried any news.
+So the end cue waits for the result: Bottle when the transcript is pasted, Basso when it is not.
+A tap too short to send is cued on release instead, because no result is coming to cue.
+Between release and the result the overlay reads `Transcribing…` and the menu bar shows ⏳ (§4.1), so the gap is not unfeedbacked silence.
+- **The success cue precedes the paste**, because the paste blocks until the chord is physically released and cueing after it would delay the only confirmation the user gets.
 - **Volume is relative, not absolute.**
 `afplay -v` multiplies the system output level rather than replacing it, so `TALKIE_SOUND_VOLUME` cannot make a muted Mac audible, and a low system volume compounds with it.
 The default is therefore `1.0`; values above 1 amplify, for a Mac habitually turned down.
 
-Cue assignment: Tink on hotkey down ("listening"), Bottle on release ("heard you"), Basso on failure.
+Cue assignment: Tink on hotkey down ("listening"), Bottle when a transcript is pasted, Basso when nothing was.
 
 ### 3.1 Probing the permissions
 

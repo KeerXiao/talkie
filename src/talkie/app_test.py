@@ -143,6 +143,9 @@ def test_hotkey_is_ignored_while_a_transcription_is_in_flight(sound):
 
 
 def test_failed_transcription_beeps_and_pastes_nothing(sound):
+    """One cue at the end, and the failure is the one worth hearing. Cueing the
+    release as well put two sounds ~0.5s apart, which on a short clip arrived
+    as a stutter rather than as news."""
     paster = FakePaster()
     app = build(client=FakeClient(error=ServerError("upstream down", 503)),
                 paster=paster, sound=sound)
@@ -150,7 +153,7 @@ def test_failed_transcription_beeps_and_pastes_nothing(sound):
     dictate(app)
 
     assert paster.pasted == []
-    assert sound.cues == ["start", "stop", "error"]
+    assert sound.cues == ["start", "error"]
     assert (app._recording, app._busy) == (False, False)
 
 
@@ -161,7 +164,9 @@ def test_empty_transcript_beeps_rather_than_pasting_nothing(sound):
     dictate(app)
 
     assert paster.pasted == []
-    assert sound.cues[-1] == "error"
+    # The case that made the double sound audible: a sub-second tap comes back
+    # empty almost at once, so the release cue and the failure cue collided.
+    assert sound.cues == ["start", "error"]
 
 
 def test_unexpected_worker_failure_is_contained(sound):
@@ -618,3 +623,46 @@ def test_a_retry_of_a_streaming_config_replays_the_file_through_a_session():
     assert stream.opened == 1
     assert sum(len(b) for b in stream.session.fed) == 16000
     assert stream.session.cancelled is True  # the socket is not left open
+
+
+def test_every_outcome_ends_in_exactly_one_cue(sound):
+    """Whatever happens, a dictation makes two sounds: one on the key, one on
+    the result. Which one the result makes is the only variable."""
+    outcomes = {
+        "pasted": FakeClient(text="hi"),
+        "empty": FakeClient(text=""),
+        "failed": FakeClient(error=ServerError("down", 503)),
+    }
+    for name, client in outcomes.items():
+        cues = FakePlayer()
+        dictate(build(client=client, sound=cues))
+        assert len(cues.cues) == 2, f"{name}: {cues.cues}"
+        assert cues.cues[0] == "start", name
+        assert cues.cues[1] == ("stop" if name == "pasted" else "error"), name
+
+
+def test_a_discarded_tap_still_cues_on_release(sound):
+    """Nothing is sent, so the release is the whole outcome — there is no
+    result cue coming to replace it."""
+    app = build(recorder=FakeRecorder(duration=0.1), sound=sound)
+    dictate(app)
+    assert sound.cues == ["start", "stop"]
+
+
+def test_the_success_cue_comes_before_the_paste(sound):
+    """The paste blocks until the chord is physically released, so cueing after
+    it would delay the only confirmation the user gets."""
+    order = []
+
+    class OrderedPaster(FakePaster):
+        def paste(self, text, before=None):
+            order.append("paste")
+            super().paste(text, before=before)
+
+    class OrderedPlayer(FakePlayer):
+        def stop(self):
+            order.append("cue")
+            super().stop()
+
+    dictate(build(paster=OrderedPaster(), sound=OrderedPlayer()))
+    assert order == ["cue", "paste"]
