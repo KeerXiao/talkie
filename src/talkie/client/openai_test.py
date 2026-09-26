@@ -464,7 +464,7 @@ def test_cancel_sends_no_commit_and_raises_nothing():
     live, connection = session()
     speak(live)
     live.cancel()
-    assert connection.closed
+    assert until(lambda: connection.closed)
     assert live.text == ""
 
 
@@ -560,6 +560,22 @@ def live_threads():
     return [t for t in threading.enumerate() if t.name.startswith("talkie-rt")]
 
 
+def until(predicate, seconds=3.0):
+    """Wait for something the session does on its own thread.
+
+    Closing is asynchronous by contract: `cancel()` records the intent and the
+    reader closes the socket the moment it has one, which may be after the
+    handshake it is still inside. Asserting immediately is a race — it is what
+    made this file fail about one run in twenty.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
 def test_cancelling_during_the_handshake_still_closes_the_socket():
     """A tap under min_seconds cancels well inside a real handshake. Without
     this the socket and both threads outlive every stray tap (SPEC §6.9 #10)."""
@@ -568,10 +584,7 @@ def test_cancelling_during_the_handshake_still_closes_the_socket():
     speak(live, seconds=0.05)
     live.cancel()  # no socket exists yet
 
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline and not connection.closed:
-        time.sleep(0.02)
-    assert connection.closed is True
+    assert until(lambda: connection.closed)
 
 
 def test_fifty_abandoned_dictations_leave_nothing_behind():
@@ -585,9 +598,7 @@ def test_fifty_abandoned_dictations_leave_nothing_behind():
         live.cancel()
         connections.append(connection)
 
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and live_threads():
-        time.sleep(0.05)
+    assert until(lambda: not live_threads(), seconds=5)
     assert live_threads() == []
     assert [c for c in connections if not c.closed] == []
     assert len(live_threads()) == before
@@ -600,9 +611,7 @@ def test_fifty_completed_dictations_leave_nothing_behind():
         speak(live, seconds=0.1)
         live.finish()
 
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and live_threads():
-        time.sleep(0.05)
+    assert until(lambda: not live_threads(), seconds=5)
     assert len(live_threads()) == before
 
 

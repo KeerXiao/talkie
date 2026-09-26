@@ -38,6 +38,11 @@ The UI attaches to `app.py` alone.
 Tests sit beside the code they cover, Go style: `hotkey.py` and `hotkey_test.py` are neighbours.
 `pyproject.toml` excludes `**/*_test.py` from the wheel so they never ship.
 
+**No test may block.**
+The suite exercises a hotkey loop, a microphone and WebSockets, so a test that hangs does not merely fail — it leaves a process holding the real hotkey and sounding its own cues.
+Two once survived two days that way, alongside the running app, and the symptom was three start cues for one keypress.
+Two defences: `cli_test.py` replaces `Talkie` for every test in the file so `main()` cannot reach the loop even if config resolution unexpectedly succeeds, and `pytest-timeout` caps every test at 60 s using the thread method, because signals do not land while the main thread sits in a native call (§8).
+
 Runtime deps: `sounddevice`, `numpy`, `requests`, `pynput`, `pyperclip`, `openai[realtime]`, plus `pywebview` and PyObjC for the UI, and a `ui/` Vite + TypeScript project.
 The frontend builds to a single self-contained `src/talkie/ui/web/index.html`, which is committed, so running talkie never requires Node.
 (`sounddevice` needs PortAudio.

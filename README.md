@@ -209,7 +209,7 @@ Switching is the Model field in the settings tab, or `export TALKIE_MODEL=...` �
 ## Development
 
 ```sh
-make test      # 377 tests — no microphone, network, or permissions needed
+make test      # 381 tests — no microphone, network, or permissions needed
 ```
 
 Tests live **beside the code they test**, Go-style: `audio.py` next to `audio_test.py`.
