@@ -223,7 +223,6 @@ class Talkie:
             self._busy = True
 
         clip = self.recorder.stop()
-        self.sound.stop()
         with self._lock:
             session, self._session = self._session, None
             streamed, self._streamed = self._streamed, False
@@ -232,6 +231,8 @@ class Talkie:
             # request, and the clip must finish against what it started with.
             client = self.client
         if clip.duration < self.config.min_seconds:
+            # Nothing is sent, so this is the whole outcome: cue it here.
+            self.sound.stop()
             log.info("discarded %.2fs tap", clip.duration)
             if session is not None:
                 session.cancel()
@@ -246,6 +247,12 @@ class Talkie:
 
     # -- worker ------------------------------------------------------------
 
+    # One cue per dictation, and the outcome picks it. The release used to cue
+    # immediately and a failure cued again about half a second later, which on a
+    # sub-second tap arrived as a stutter rather than as two distinct sounds —
+    # and the second one is the only one carrying news. Between release and the
+    # result the overlay says "Transcribing…" and the menu bar shows ⏳, so the
+    # silence is not the only feedback.
     def _handle(
         self,
         clip: Clip,
@@ -257,11 +264,13 @@ class Talkie:
         try:
             transcript = self._transcribe(clip, session, streamed, client or self.client)
             if not transcript.text:
+                # Error only — see _cue_once below.
                 log.warning("empty transcript (%.1fs clip)", clip.duration)
                 self.sound.error()
                 self._save(clip, started_at, error=EMPTY)
                 self._emit(ERROR)
                 return
+            self.sound.stop()
             self.paster.paste(transcript.text, before=self.listener.wait_until_released)
             cost = f" · ${transcript.cost:.5f}" if transcript.cost is not None else ""
             log.info(

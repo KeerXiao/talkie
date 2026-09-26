@@ -170,6 +170,9 @@ Taps shorter than 0.3 s are ignored, so a stray keypress costs nothing.
 Your previous clipboard contents are restored after the paste.
 Failures beep and log — error text is never pasted into your document.
 
+Each dictation makes two sounds: one when the key goes down, and one when the result arrives — a soft cue if the transcript was pasted, an alert if it was not.
+Nothing sounds in between, because the strip on screen already says it is working.
+
 ## Configuration
 
 | Variable | Default | Purpose |
