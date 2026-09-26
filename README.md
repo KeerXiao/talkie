@@ -5,6 +5,10 @@
 Hold a key, say a sentence, let go — the transcript is pasted wherever your cursor already is.
 No switching apps, no "upload a file and wait".
 
+![Holding the hotkey in a terminal: an overlay fills in word by word while the sentence is still being spoken, then the finished text is pasted at the cursor](docs/streaming.gif)
+
+*A streaming model, in real time — the overlay is a beat behind the voice, and nothing was typed.*
+
 ```
   hold Ctrl+Q  ──▶  🎙 record  ──▶  a speech model  ──▶  ⌘V at the cursor
      release                            ~1 s
@@ -97,11 +101,20 @@ On a one-shot model — which is every OpenRouter model — nothing comes back u
 A clip the model heard nothing in says `Nothing heard`, and a clip that failed shows why.
 Either way it fades a moment after the paste.
 
+![The same hotkey on a one-shot model: the overlay reads Listening…, then Transcribing…, then shows the finished sentence, which is pasted at the cursor](docs/demo.gif)
+
+*The same hotkey on a one-shot model — a spinner where the streaming one showed words.*
+
 It never takes focus and never accepts a click.
 That is not a detail: the transcript is about to be pasted into whatever app is frontmost, so a preview window that stole focus would make talkie frontmost and paste into itself.
 
-The window lists every past dictation, newest first, grouped by day.
-Each row can be copied, replayed, or deleted, and there's a search box over the transcripts.
+### The history window
+
+![The history window: dictations grouped under TODAY, each row showing the time, the clip length, what it cost, and the transcript](docs/history_page.png)
+
+Every dictation you have made, newest first, grouped by day.
+Each row carries the time it was said, how long the clip ran, and what it cost — the last two being invisible everywhere else until the bill arrives.
+Rows can be copied, replayed, or deleted, and the search box at the top searches the transcripts.
 **Failed clips are kept too**, with the error in place of the transcript and their audio still playable — so when something goes wrong you can hear exactly what the model was sent.
 They also get a **Retry** button: the audio is still on disk, so a clip that failed is sent again rather than said again, through whatever provider and model you have configured now.
 The transcript replaces the error in the same row, and you copy it from there — nothing is pasted, because the window you are looking at is talkie.
@@ -111,7 +124,11 @@ Nothing is uploaded anywhere except the transcription request itself.
 
 ### Settings
 
-The window's second tab holds the knobs worth reaching for twice:
+The window's second tab holds the knobs worth reaching for twice.
+
+![The settings tab: Language, Provider and Model, each control followed by a sentence explaining what the choice changes](docs/setting_page.png)
+
+Every control carries its own explanation, so the table below is a summary rather than the manual:
 
 | | |
 |---|---|
