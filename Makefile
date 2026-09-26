@@ -21,6 +21,7 @@ install: ## Install everything talkie needs
 	@echo
 	@echo "Installed. Two things left, both one-time:"
 	@echo "  1. export OPENROUTER_API_KEY=sk-or-v1-...   (https://openrouter.ai/keys)"
+	@echo "     or OPENAI_API_KEY=sk-...  for live transcripts (https://platform.openai.com)"
 	@echo "  2. grant Microphone, Input Monitoring and Accessibility to your terminal"
 	@echo "     (System Settings > Privacy & Security -- see README.md)"
 	@echo

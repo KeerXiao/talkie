@@ -11,7 +11,10 @@ from talkie.ui.app import TalkieApp
 
 class FakeMenuBar:
     def __init__(self):
-        self.states, self.stats = [], []
+        self.states, self.stats, self.models = [], [], []
+
+    def set_model(self, model, language, mode=None):
+        self.models.append((model, language, mode))
 
     def set_state(self, state):
         self.states.append(state)
@@ -113,3 +116,148 @@ def test_the_pump_stops_once_stopping(app, monkeypatch):
     app._stopping = True
     app._pump()
     assert len(scheduled) == 1  # not rescheduled again
+
+
+# -- the live overlay (M3) -------------------------------------------------
+
+
+class FakeOverlay:
+    def __init__(self):
+        self.calls = []
+
+    def show(self, text="", state=""):
+        self.calls.append(("show", text, state))
+
+    def update(self, text):
+        self.calls.append(("update", text))
+
+    def finish(self, text):
+        self.calls.append(("finish", text))
+
+    def settle(self):
+        self.calls.append(("settle",))
+
+    def hide(self):
+        self.calls.append(("hide",))
+
+
+@pytest.fixture
+def overlaid(app):
+    app.overlay = FakeOverlay()
+    return app
+
+
+def test_the_strip_appears_when_recording_starts(overlaid):
+    overlaid._on_state("recording")
+    assert overlaid.overlay.calls == [("show", "", "")]
+
+
+def test_partials_go_straight_to_the_strip(overlaid):
+    overlaid._on_partial("the quick")
+    overlaid._on_partial("the quick brown")
+    assert overlaid.overlay.calls == [("update", "the quick"), ("update", "the quick brown")]
+
+
+def test_a_one_shot_clip_keeps_the_strip_up_while_it_waits(overlaid):
+    """The overlay is not conditional on paying for streaming (SPEC §6.4)."""
+    assert not overlaid.config.streaming
+    overlaid._on_state("transcribing")
+    assert overlaid.overlay.calls == [("show", "", "working")]
+
+
+def test_a_streamed_clip_does_not_blank_the_strip_on_release(overlaid):
+    """Its last partial is still the best thing to show."""
+    from dataclasses import replace
+
+    overlaid.config = replace(
+        overlaid.config, provider="openai", model="gpt-live-transcribe"
+    )
+    assert overlaid.config.streaming
+    overlaid._on_state("transcribing")
+    assert overlaid.overlay.calls == []
+
+
+def test_the_finished_transcript_is_shown_then_left_to_fade(overlaid, tmp_path):
+    from talkie.history import Interaction
+
+    overlaid._on_record(Interaction(id="1", started_at=None, duration=1.0,
+                                    model="m", text="all done"))
+    assert ("finish", "all done") in overlaid.overlay.calls
+
+
+def test_a_failure_says_what_went_wrong_rather_than_vanishing(overlaid):
+    from talkie.history import Interaction
+
+    overlaid._on_record(Interaction(id="1", started_at=None, duration=1.0,
+                                    model="m", text="", error="network unreachable"))
+    assert ("finish", "network unreachable") in overlaid.overlay.calls
+
+
+def test_quitting_takes_the_strip_down(overlaid):
+    overlaid.stop()
+    assert ("hide",) in overlaid.overlay.calls
+
+
+def test_every_observer_survives_having_no_overlay_yet(app):
+    """The observers can fire before run() has built it."""
+    app.overlay = None
+    app._on_state("recording")
+    app._on_partial("hello")
+    app.stop()
+
+
+def test_a_tap_too_short_to_transcribe_takes_the_strip_down(overlaid):
+    """It writes no history row, so nothing else would ever hide it."""
+    overlaid._on_state("recording")
+    overlaid._on_state("idle")
+    assert overlaid.overlay.calls[-1] == ("settle",)
+
+
+def test_a_failed_clip_also_settles(overlaid):
+    overlaid._on_state("error")
+    assert overlaid.overlay.calls == [("settle",)]
+
+
+def test_choosing_a_provider_with_no_key_says_which_one_to_export(tmp_path):
+    """SPEC §6.9 #8: OpenAI still appears in the page with only an OpenRouter
+    key set, and choosing it reports the variable rather than failing at the
+    next dictation."""
+    from talkie.config import Config
+    from talkie.settings import SettingsStore
+
+    app = TalkieApp(
+        Config.from_env({"OPENROUTER_API_KEY": "sk-or"}),
+        history=History(root=tmp_path / "h"),
+        store=SettingsStore(tmp_path / "settings.json"),
+    )
+    app.menubar = FakeMenuBar()
+    app.window = FakeWindow()
+
+    result = app.api.update_settings({"provider": "openai"})
+
+    assert result["ok"] is False
+    assert "OPENAI_API_KEY" in result["error"]
+    assert app.config.provider == "openrouter"   # still usable
+    assert app.talkie.config.provider == "openrouter"
+    assert not (tmp_path / "settings.json").exists()
+
+
+def test_switching_provider_takes_effect_without_a_restart(tmp_path):
+    """SPEC §6.9 #7."""
+    from talkie.client.openai import OpenAIClient
+    from talkie.config import Config
+    from talkie.settings import SettingsStore
+
+    app = TalkieApp(
+        Config.from_env({"OPENROUTER_API_KEY": "sk-or", "OPENAI_API_KEY": "sk-oai"}),
+        history=History(root=tmp_path / "h"),
+        store=SettingsStore(tmp_path / "settings.json"),
+    )
+    app.menubar = FakeMenuBar()
+    app.window = FakeWindow()
+
+    result = app.api.update_settings({"provider": "openai", "model": "whisper-1"})
+
+    assert result["ok"] is True
+    assert isinstance(app.talkie.client, OpenAIClient)
+    assert app.talkie.client.api_key == "sk-oai"

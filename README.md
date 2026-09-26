@@ -1,13 +1,15 @@
 # talkie
 
-**Push-to-talk dictation for macOS, through any speech model on OpenRouter.**
+**Push-to-talk dictation for macOS, through any speech model on OpenRouter or OpenAI — with the words on screen as you say them.**
 
 Hold a key, say a sentence, let go — the transcript is pasted wherever your cursor already is.
 No switching apps, no "upload a file and wait".
 
 ```
-  hold Ctrl+Q  ──▶  🎙 record  ──▶  OpenRouter  ──▶  ⌘V at the cursor
-     release                          ~1 s
+  hold Ctrl+Q  ──▶  🎙 record  ──▶  a speech model  ──▶  ⌘V at the cursor
+     release                            ~1 s
+
+  streaming:   the transcript appears in an overlay while you are still talking
 ```
 
 ## Quick start
@@ -53,9 +55,11 @@ Local dictation tools ([Handy](https://github.com/cjpais/Handy), MacWhisper) run
 That is private and free, but the accuracy gap to frontier cloud models is large and obvious once you have used both — roughly **2% word error rate versus 12%** on the [Artificial Analysis leaderboard](https://artificialanalysis.ai/speech-to-text).
 
 talkie takes the other trade: send the audio out, get transcripts that don't need fixing.
-Everything goes through [OpenRouter](https://openrouter.ai), so one API key reaches every speech model and switching between them is a one-line environment variable.
+[OpenRouter](https://openrouter.ai) is the default, because one API key reaches every speech model there and every request comes back priced.
+[OpenAI](https://platform.openai.com) is the second option, because it is the one that will stream — and seeing a mistake while you are still speaking is worth more than seeing it after it has been pasted.
 
-At current prices this costs about **$0.10 per hour of speech** — a heavy day of dictation is a few cents.
+At current prices OpenRouter costs about **$0.10 per hour of speech** — a heavy day of dictation is a few cents.
+Live transcription is about **$1.02 an hour**, roughly ten times as much, which is why it is a choice rather than the default.
 
 ## Status
 
@@ -63,6 +67,7 @@ At current prices this costs about **$0.10 per hour of speech** — a heavy day 
 |---|---|---|
 | **M1** | End-to-end flow: hotkey → record → transcribe → paste | ✅ working |
 | **M2** | History window + menu-bar icon (copy text, replay audio) | ✅ working |
+| **M3** | Live transcripts in an overlay, and OpenAI as a second provider | ✅ working |
 
 ## The app
 
@@ -81,7 +86,18 @@ That icon is the status display, because while you're dictating you're looking a
 | ⏳ | transcribing |
 | ⚠️ | the last attempt failed |
 
-Clicking it shows your hotkey, your model, and today's running total — clips, minutes, and cost.
+Clicking it shows your hotkey, your model and mode, and today's running total — clips, minutes, and cost.
+
+### Seeing what you said
+
+While you hold the key, a strip appears near the bottom of the screen with the transcript in it.
+
+On a streaming model the words arrive as you speak them, a beat behind your voice, so a misheard word is obvious before you have finished the sentence.
+On a one-shot model the strip shows the finished transcript when it lands — later, but still without going to look for it.
+Either way it fades a moment after the paste.
+
+It never takes focus and never accepts a click.
+That is not a detail: the transcript is about to be pasted into whatever app is frontmost, so a preview window that stole focus would make talkie frontmost and paste into itself.
 
 The window lists every past dictation, newest first, grouped by day.
 Each row can be copied, replayed, or deleted, and there's a search box over the transcripts.
@@ -92,12 +108,14 @@ Nothing is uploaded anywhere except the transcription request itself.
 
 ### Settings
 
-The window's second tab holds the four knobs worth reaching for twice:
+The window's second tab holds the knobs worth reaching for twice:
 
 | | |
 |---|---|
 | **Language** | English, Chinese, and the rest — or **Auto-detect**, which sends no hint at all and lets the model work it out. Pinning it stops a short clip being guessed wrong; auto handles switching mid-session. |
-| **Model** | Any OpenRouter transcription model ID, with the known-good ones suggested. |
+| **Provider** | OpenRouter or OpenAI. Each reads its own key from the environment; switching needs no restart, but the key has to be exported. Choosing one you have no key for says which variable to set, rather than failing at the next dictation. |
+| **Model** | Any transcription model ID from that provider, with the known-good ones suggested. |
+| **Mode** | **Streaming** or **One-shot**. Locked, with the reason, when the model only works one way — and it shows what will actually run, not what you asked for. |
 | **Sound cues** | The start/stop/error beeps, 0–3×. `0` turns them off. |
 | **Keep history** | 1–500 clips. Lowering it deletes the excess right away. |
 
@@ -153,15 +171,21 @@ Failures beep and log — error text is never pasted into your document.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | *(required)* | Your OpenRouter key |
-| `TALKIE_MODEL` | `microsoft/mai-transcribe-2` | Any OpenRouter speech-to-text model ID |
+| `OPENROUTER_API_KEY` | *(one key required)* | Your OpenRouter key |
+| `OPENAI_API_KEY` | *(one key required)* | Your OpenAI key, if you want streaming |
+| `TALKIE_PROVIDER` | `openrouter` | `openrouter` or `openai` |
+| `TALKIE_MODE` | `batch` | `stream` or `batch`, overridden by what the model supports |
+| `TALKIE_MODEL` | the provider's default | Any speech-to-text model ID for that provider |
 | `TALKIE_HOTKEY` | `ctrl+q` | Push-to-talk chord, e.g. `ctrl+alt+d`, `f5` |
 | `TALKIE_LANGUAGE` | `en` | Sent as the `language` hint; set empty to let the model auto-detect |
 | `TALKIE_SOUND_VOLUME` | `1.0` | Cue volume. `0` turns the sounds off; `>1` amplifies |
 | `TALKIE_HISTORY_KEEP` | `50` | How many past dictations to keep |
 
-Model, language, sound volume and retention can also be set from the [settings page](#settings), and what you set there wins — check that tab first if a variable seems to be ignored.
-The key and the hotkey are environment-only.
+At least one key must be set.
+With both, OpenRouter wins; with one, that provider is selected — exporting a single key is an unambiguous choice.
+
+Provider, model, mode, language, sound volume and retention can also be set from the [settings page](#settings), and what you set there wins — check that tab first if a variable seems to be ignored.
+The keys and the hotkey are environment-only: talkie is bring-your-own-key and never writes a credential to disk.
 Both `make run` and `make ui` read the same saved settings, so they never disagree.
 
 `TALKIE_SOUND_VOLUME` *multiplies* your system output volume rather than replacing it, so it can't make a muted Mac audible — turn the Mac up first.
@@ -179,7 +203,7 @@ Switching is the Model field in the settings tab, or `export TALKIE_MODEL=...` �
 ## Development
 
 ```sh
-make test      # 158 tests — no microphone, network, or permissions needed
+make test      # 351 tests — no microphone, network, or permissions needed
 ```
 
 Tests live **beside the code they test**, Go-style: `audio.py` next to `audio_test.py`.
@@ -196,7 +220,8 @@ src/talkie/
 ├── history.py      ~/.talkie/history — atomic writes, 50-entry retention
 ├── config.py       environment → Config
 ├── cli.py          argument parsing and wiring
-├── client/         OpenRouter HTTP — nothing above this imports requests
+├── client/         OpenRouter HTTP and OpenAI HTTP/WebSocket — nothing above
+│                   this imports requests or a vendor SDK
 └── ui/             api.py — the interface the window calls
                     window host (pywebview), menu bar + dock + icon (PyObjC)
 ui/                 the history window's TypeScript source (Vite)
@@ -211,7 +236,8 @@ Everything is injected rather than imported at the point of use, so the whole fl
 
 - **macOS only.** The hotkey, paste and cue layers all assume it.
 - **No maximum recording length.** If a key-release event is ever missed, talkie keeps recording. Bounded in M2.
-- **Push-to-talk only** — no toggle mode, no streaming, no partial results.
+- **Push-to-talk only** — no toggle mode, no always-listening, no wake word.
+- **Streaming needs OpenAI.** OpenRouter's transcription endpoint is batch-only, so no model reached through it can show a word before you let go.
 - **Not a bundled `.app` yet.** It runs from a terminal, so macOS attributes permissions to your terminal rather than to talkie. [DESIGN.md](DESIGN.md) §10 has the packaging plan.
 - **Your audio leaves your machine.** That's the entire premise. If that's not acceptable, use a local tool.
 
@@ -220,7 +246,7 @@ Everything is injected rather than imported at the point of use, so the whole fl
 [SPEC.md](SPEC.md) is the requirements: what talkie has to do, the milestones, the configuration surface, and the acceptance criteria.
 Short by design.
 
-[DESIGN.md](DESIGN.md) is how it is built: the module map, the OpenRouter request contract, the error and retry model, why the audio cues are fired the way they are, the UI process architecture and its spikes, and the shutdown story.
+[DESIGN.md](DESIGN.md) is how it is built: the module map, the request and socket contracts, the error and retry model, why the audio cues are fired the way they are, the UI process architecture and its spikes, and the shutdown story.
 
 ## License
 

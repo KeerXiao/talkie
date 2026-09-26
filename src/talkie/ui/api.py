@@ -24,14 +24,16 @@ from datetime import datetime, timezone
 import pyperclip
 
 from talkie.history import History, Interaction
+from talkie import providers
 from talkie.settings import (
+    COERCE,
     LANGUAGES,
     MAX_KEEP,
     MAX_VOLUME,
-    MODELS,
     Settings,
     SettingsError,
     SettingsStore,
+    models_for,
 )
 
 log = logging.getLogger(__name__)
@@ -95,7 +97,15 @@ class Api:
         return {
             "settings": self.settings.to_json(),
             "languages": LANGUAGES,
-            "models": MODELS,
+            "models": models_for(self.settings.provider),
+            # The whole table, so the page can grey out a mode the chosen model
+            # cannot honour and say why, without a round trip per keystroke.
+            "providers": providers.to_json(),
+            "modes": [
+                {"id": mode, "label": providers.MODE_LABELS[mode]}
+                for mode in providers.MODES
+            ],
+            "runningMode": self.settings.running_mode,
             "limits": {"maxVolume": MAX_VOLUME, "maxKeep": MAX_KEEP},
         }
 
@@ -120,14 +130,31 @@ class Api:
             log.exception("could not read the settings patch")
             return {"ok": False, "field": "", "error": "could not read those settings"}
 
+        # Applied before it is persisted, and rolled back if it will not
+        # apply. A provider whose key was never exported is rejected here, and
+        # saving it first would leave the page reporting success over a file
+        # that breaks the next start.
+        previous = self.settings
         self.settings = updated
-        persisted = self.store.save(updated)
         if self._on_settings_changed is not None:
             try:
                 self._on_settings_changed(updated)
-            except Exception:
-                log.exception("could not apply settings to the running app")
-        return {"ok": True, "persisted": persisted, "settings": updated.to_json()}
+            except Exception as exc:
+                log.warning("could not apply settings: %s", exc)
+                self.settings = previous
+                try:
+                    self._on_settings_changed(previous)
+                except Exception:
+                    log.exception("could not restore the previous settings")
+                return {"ok": False, "field": _blamed(patch), "error": str(exc)}
+
+        persisted = self.store.save(updated)
+        return {
+            "ok": True,
+            "persisted": persisted,
+            "settings": updated.to_json(),
+            "runningMode": updated.running_mode,
+        }
 
     def copy(self, clip_id: str) -> bool:
         entry = self.history.get(clip_id)
@@ -165,3 +192,14 @@ class Api:
             "model": entry.model,
             "latency": entry.latency,
         }
+
+
+def _blamed(patch: dict) -> str:
+    """Which control to point the message at.
+
+    A failure to apply comes from the combination, not one value, so the field
+    the user just touched is the only honest answer — and with one field per
+    change, which is how the page saves, it is also the right one.
+    """
+    fields = [key for key in (patch or {}) if key in COERCE]
+    return fields[0] if len(fields) == 1 else ""
