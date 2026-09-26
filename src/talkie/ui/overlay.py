@@ -54,8 +54,22 @@ PADDING = 18.0
 # next thing the user does.
 LINGER = 1.6
 
+# What the strip reads when there is no transcript to show yet. Text always
+# wins over a placeholder; these are only for the gaps.
+#
+# A one-shot model never sends a word before the request returns, so the wait
+# has to be named rather than hinted at — a bare ellipsis looks like a stalled
+# stream, which on OpenRouter is the only thing the user would ever see.
 LISTENING = "Listening…"
-WORKING = "…"
+WORKING = "Transcribing…"
+NOTHING = "Nothing heard"
+
+# The gap the strip is filling, when it is filling one.
+HOLDING = "holding"    # the key is down and the mic is open
+WAITING = "waiting"    # the key is up and the request is out
+DONE = "done"          # the clip is finished, whatever it produced
+
+PLACEHOLDERS = {HOLDING: LISTENING, WAITING: WORKING, DONE: NOTHING}
 
 # A hold can run for minutes; the panel shows the end of it, which is the part
 # still being spoken. Whole words only — a caption cut mid-word reads as an
@@ -63,16 +77,17 @@ WORKING = "…"
 MAX_CHARS = 180
 
 
-def caption(text: str, state: str = "") -> str:
-    """What the strip should read for this text.
+def caption(text: str, state: str = HOLDING) -> str:
+    """What the strip should read.
 
-    An empty transcript is not blank: the panel appearing with nothing in it
-    looks like a failure, when in fact nothing has come back yet.
+    Text wins whenever there is any. Otherwise the placeholder names the gap:
+    the panel appearing blank looks like a failure, and an ellipsis that never
+    grows looks like a stream that died.
     """
     text = (text or "").strip()
     if text:
         return trim(text, MAX_CHARS)
-    return WORKING if state == "working" else LISTENING
+    return PLACEHOLDERS.get(state, LISTENING)
 
 
 def trim(text: str, limit: int = MAX_CHARS) -> str:
@@ -161,7 +176,7 @@ class Overlay:
 
     # -- from any thread ---------------------------------------------------
 
-    def show(self, text: str = "", state: str = "") -> None:
+    def show(self, text: str = "", state: str = HOLDING) -> None:
         AppHelper.callAfter(self._apply_show, caption(text, state))
 
     def update(self, text: str) -> None:
@@ -169,8 +184,12 @@ class Overlay:
         AppHelper.callAfter(self._apply_text, caption(text))
 
     def finish(self, text: str) -> None:
-        """Show the final transcript, then fade out on its own."""
-        AppHelper.callAfter(self._apply_finish, caption(text, "working"))
+        """Show the final transcript, then fade out on its own.
+
+        An empty one is not left blank: a clip the model heard nothing in says
+        so, rather than looking like the strip failed to update.
+        """
+        AppHelper.callAfter(self._apply_finish, caption(text, DONE))
 
     def settle(self) -> None:
         """The dictation ended. Take the strip down — unless a transcript is

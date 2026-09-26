@@ -1,8 +1,12 @@
 """The overlay's text policy. The AppKit panel is exercised by running it."""
 
 from talkie.ui.overlay import (
+    DONE,
+    HOLDING,
     LISTENING,
     MAX_CHARS,
+    NOTHING,
+    WAITING,
     WORKING,
     Overlay,
     caption,
@@ -18,12 +22,26 @@ def test_nothing_heard_yet_says_so_rather_than_going_blank():
     assert caption(None) == LISTENING
 
 
-def test_a_one_shot_clip_waiting_on_the_request_says_something_different():
-    assert caption("", state="working") == WORKING
+def test_a_one_shot_clip_names_the_wait_rather_than_hinting_at_it():
+    """A bare ellipsis reads as a stream that died — and on a one-shot model it
+    is the only thing the user ever sees before the transcript lands."""
+    assert caption("", state=WAITING) == WORKING == "Transcribing…"
 
 
-def test_text_wins_over_any_placeholder():
-    assert caption("hello there", state="working") == "hello there"
+def test_a_clip_with_no_speech_in_it_says_so():
+    """Rather than leaving the strip blank, which looks like it failed to
+    update, or naming a failure there is nothing to act on."""
+    assert caption("", state=DONE) == NOTHING
+
+
+def test_an_unknown_state_falls_back_to_listening():
+    assert caption("", state="something-new") == LISTENING
+    assert caption("", state=HOLDING) == LISTENING
+
+
+def test_text_wins_over_every_placeholder():
+    for state in (HOLDING, WAITING, DONE):
+        assert caption("hello there", state=state) == "hello there"
 
 
 def test_surrounding_whitespace_is_dropped():

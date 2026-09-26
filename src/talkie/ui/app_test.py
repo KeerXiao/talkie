@@ -158,11 +158,12 @@ def test_partials_go_straight_to_the_strip(overlaid):
     assert overlaid.overlay.calls == [("update", "the quick"), ("update", "the quick brown")]
 
 
-def test_a_one_shot_clip_keeps_the_strip_up_while_it_waits(overlaid):
-    """The overlay is not conditional on paying for streaming (SPEC §6.4)."""
+def test_a_one_shot_clip_names_the_wait_while_it_waits(overlaid):
+    """The overlay is not conditional on paying for streaming (SPEC §6.4), and
+    on a one-shot model this is the only state seen before the transcript."""
     assert not overlaid.config.streaming
     overlaid._on_state("transcribing")
-    assert overlaid.overlay.calls == [("show", "", "working")]
+    assert overlaid.overlay.calls == [("show", "", "waiting")]
 
 
 def test_a_streamed_clip_does_not_blank_the_strip_on_release(overlaid):
@@ -191,6 +192,18 @@ def test_a_failure_says_what_went_wrong_rather_than_vanishing(overlaid):
     overlaid._on_record(Interaction(id="1", started_at=None, duration=1.0,
                                     model="m", text="", error="network unreachable"))
     assert ("finish", "network unreachable") in overlaid.overlay.calls
+
+
+def test_a_clip_with_no_speech_is_not_reported_as_a_failure(overlaid):
+    """"empty transcript" is the history row's wording, not something worth
+    putting on screen — there is nothing for the user to act on."""
+    from talkie.app import EMPTY
+    from talkie.history import Interaction
+
+    overlaid._on_record(Interaction(id="1", started_at=None, duration=0.6,
+                                    model="", text="", error=EMPTY))
+    # Empty text, so the overlay fills it with its own "Nothing heard".
+    assert ("finish", "") in overlaid.overlay.calls
 
 
 def test_quitting_takes_the_strip_down(overlaid):
